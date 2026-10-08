@@ -78,6 +78,22 @@ $(document).ready(function() {
       }
     });
   });
+  // Domain health modal
+  $('#domainHealthModal').on('show.bs.modal', function(e) {
+    var domain = $(e.relatedTarget).data('domain');
+    $('.domain-health-modal-body').html('<div class="spinner-border" role="status"><span class="visually-hidden">Loading...</span></div>');
+    $.ajax({
+      url: '/inc/ajax/domain_health.php',
+      data: { domain: domain },
+      dataType: 'text',
+      success: function(data){
+        $('.domain-health-modal-body').html(data);
+      },
+      error: function(xhr, status, error) {
+        $('.domain-health-modal-body').html(xhr.responseText);
+      }
+    });
+  });
   // @Open Domain add modal
   $('#addDomainModal').on('show.bs.modal', function(e) {
     $.ajax({
@@ -510,11 +526,13 @@ jQuery(function($){
             if (role == "admin") {
               item.action += '<a href="/edit/domain/' + encodeURIComponent(item.domain_name) + '" class="btn btn-sm btn-xs-lg btn-xs-half btn-secondary"><i class="bi bi-pencil-fill"></i> ' + lang.edit + '</a>' +
                 '<a href="#" data-action="delete_selected" data-id="single-domain" data-api-url="delete/domain" data-item="' + encodeURIComponent(item.domain_name) + '" class="btn btn-sm btn-xs-lg btn-xs-half btn-danger"><i class="bi bi-trash"></i> ' + lang.remove + '</a>' +
-                  '<a href="#dnsInfoModal" class="btn btn-sm btn-xs-lg btn-info" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-globe2"></i> DNS</a></div>';
+                  '<a href="#dnsInfoModal" class="btn btn-sm btn-xs-lg btn-info" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-globe2"></i> DNS</a>' +
+                  '<a href="#domainHealthModal" class="btn btn-sm btn-xs-lg btn-warning" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-heart-pulse"></i> 域名健康</a></div>';
             }
             else {
               item.action += '<a href="/edit/domain/' + encodeURIComponent(item.domain_name) + '" class="btn btn-sm btn-xs-lg btn-xs-half btn-secondary"><i class="bi bi-pencil-fill"></i> ' + lang.edit + '</a>' +
-              '<a href="#dnsInfoModal" class="btn btn-sm btn-xs-lg btn-xs-half btn-info" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-globe2"></i> DNS</a></div>';
+              '<a href="#dnsInfoModal" class="btn btn-sm btn-xs-lg btn-xs-half btn-info" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-globe2"></i> DNS</a>' +
+              '<a href="#domainHealthModal" class="btn btn-sm btn-xs-lg btn-xs-half btn-warning" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-heart-pulse"></i> 域名健康</a></div>';
             }
 
             if (Array.isArray(item.tags)){
