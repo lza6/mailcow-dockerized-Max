@@ -4,7 +4,7 @@ function init_db_schema()
   try {
     global $pdo;
 
-    $db_version = "19022026_1220";
+    $db_version = "09102026_2100";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
@@ -149,6 +149,49 @@ function init_db_schema()
           ),
           "key" => array(
             "hostname" => array("hostname")
+          )
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "resend_accounts" => array(
+        "cols" => array(
+          "id" => "INT NOT NULL AUTO_INCREMENT",
+          "label" => "VARCHAR(64) NOT NULL DEFAULT ''",
+          "api_key" => "VARCHAR(128) NOT NULL",
+          "daily_quota" => "INT NOT NULL DEFAULT '100'",
+          "active" => "TINYINT(1) NOT NULL DEFAULT '1'",
+          "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
+          "last_check" => "DATETIME(0) NULL DEFAULT NULL",
+          "check_status" => "VARCHAR(255) NOT NULL DEFAULT ''"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("id")
+          ),
+          "key" => array(
+            "api_key" => array("api_key")
+          )
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "resend_domains" => array(
+        "cols" => array(
+          "id" => "INT NOT NULL AUTO_INCREMENT",
+          "domain" => "VARCHAR(255) NOT NULL",
+          "account_id" => "INT NOT NULL",
+          "resend_domain_id" => "VARCHAR(64) NOT NULL DEFAULT ''",
+          "status" => "VARCHAR(32) NOT NULL DEFAULT 'not_started'",
+          "records_json" => "TEXT NULL DEFAULT NULL",
+          "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
+          "verified_at" => "DATETIME(0) NULL DEFAULT NULL",
+          "active" => "TINYINT(1) NOT NULL DEFAULT '1'"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("id")
+          ),
+          "key" => array(
+            "domain" => array("domain")
           )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"

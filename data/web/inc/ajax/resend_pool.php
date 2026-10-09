@@ -1,0 +1,180 @@
+<?php
+/**
+ * mailcow-dockerized-Max — Resend 号池 AJAX 端点
+ *
+ * 仅管理员可调用。所有写操作都要求 CSRF token。
+ */
+
+require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/prerequisites.inc.php';
+require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.resend_pool.inc.php';
+
+header('Content-Type: application/json; charset=utf-8');
+
+// ---- 权限：仅管理员 ----
+if (!isset($_SESSION['mailcow_cc_role']) || $_SESSION['mailcow_cc_role'] !== 'admin') {
+  http_response_code(403);
+  echo json_encode(array('ok' => false, 'message' => 'access denied'), JSON_UNESCAPED_UNICODE);
+  exit;
+}
+
+$action = isset($_REQUEST['action']) ? (string)$_REQUEST['action'] : '';
+
+// ---- 写操作需要 CSRF ----
+$write_actions = array('add_account', 'edit_account', 'delete_account', 'assign', 'auto_assign',
+                       'remove_domain', 'set_limit', 'set_cf_token', 'sync');
+if (in_array($action, $write_actions, true)) {
+  if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['CSRF']['csrf_token'] ?? '', (string)$_POST['csrf_token'])) {
+    http_response_code(403);
+    echo json_encode(array('ok' => false, 'message' => 'CSRF token invalid'), JSON_UNESCAPED_UNICODE);
+    exit;
+  }
+}
+
+function rp_json($data) {
+  echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  exit;
+}
+
+try {
+  switch ($action) {
+
+    // 列出账号 + 域名映射 + 配置
+    case 'list':
+      rp_json(array(
+        'ok' => true,
+        'accounts' => resend_pool_accounts(false),
+        'domains' => resend_pool_domains(),
+        'limit' => resend_pool_domain_limit(),
+        'cf_configured' => (bool)$redis->get('RESEND_POOL_CF_TOKEN'),
+      ));
+      break;
+
+    // 测试一个 Key（不落库）
+    case 'check_key':
+      $key = trim((string)($_POST['api_key'] ?? ''));
+      if ($key === '') rp_json(array('ok' => false, 'message' => 'API Key 不能为空'));
+      $chk = resend_check_key($key);
+      rp_json(array('ok' => $chk['ok'], 'message' => $chk['message'], 'count' => count($chk['domains'])));
+      break;
+
+    // 添加账号
+    case 'add_account':
+      $key = trim((string)($_POST['api_key'] ?? ''));
+      $label = trim((string)($_POST['label'] ?? ''));
+      if ($key === '') rp_json(array('ok' => false, 'message' => 'API Key 不能为空'));
+      if (strpos($key, 're_') !== 0) rp_json(array('ok' => false, 'message' => 'API Key 应以 re_ 开头'));
+      $chk = resend_check_key($key);
+      if (!$chk['ok']) {
+        rp_json(array('ok' => false, 'message' => 'Key 校验失败：' . $chk['message'] . '（注意：需要 Full access 权限，Sending access 无法管理域名）'));
+      }
+      $stmt = $pdo->prepare("SELECT `id` FROM `resend_accounts` WHERE `api_key` = :k LIMIT 1");
+      $stmt->execute(array(':k' => $key));
+      if ($stmt->fetch()) rp_json(array('ok' => false, 'message' => '该 Key 已存在'));
+      if ($label === '') $label = '账号 ' . date('md-His');
+      $stmt = $pdo->prepare("INSERT INTO `resend_accounts` (`label`,`api_key`,`active`,`check_status`) VALUES (:l,:k,1,:s)");
+      $stmt->execute(array(':l' => $label, ':k' => $key, ':s' => $chk['message']));
+      rp_json(array('ok' => true, 'message' => '账号「' . $label . '」已添加（' . $chk['message'] . '）'));
+      break;
+
+    // 修改账号（标签 / 启用状态）
+    case 'edit_account':
+      $id = (int)($_POST['id'] ?? 0);
+      if ($id <= 0) rp_json(array('ok' => false, 'message' => '参数错误'));
+      $sets = array(); $params = array(':id' => $id);
+      if (isset($_POST['label'])) { $sets[] = '`label`=:l'; $params[':l'] = trim((string)$_POST['label']); }
+      if (isset($_POST['active'])) { $sets[] = '`active`=:a'; $params[':a'] = (int)$_POST['active'] === 1 ? 1 : 0; }
+      if (empty($sets)) rp_json(array('ok' => false, 'message' => '没有要修改的内容'));
+      $stmt = $pdo->prepare("UPDATE `resend_accounts` SET " . implode(',', $sets) . " WHERE `id`=:id");
+      $stmt->execute($params);
+      // 同步 relayhost 状态
+      $stmt = $pdo->prepare("SELECT * FROM `resend_accounts` WHERE `id`=:id LIMIT 1");
+      $stmt->execute(array(':id' => $id));
+      $acc = $stmt->fetch(PDO::FETCH_ASSOC);
+      if ($acc) resend_pool_ensure_relayhost($acc);
+      rp_json(array('ok' => true, 'message' => '已更新'));
+      break;
+
+    // 删除账号
+    case 'delete_account':
+      $id = (int)($_POST['id'] ?? 0);
+      if ($id <= 0) rp_json(array('ok' => false, 'message' => '参数错误'));
+      // 仍承载域名的账号不允许直接删除
+      $stmt = $pdo->prepare("SELECT COUNT(*) c FROM `resend_domains` WHERE `account_id`=:id AND `active`=1");
+      $stmt->execute(array(':id' => $id));
+      if ((int)$stmt->fetch(PDO::FETCH_ASSOC)['c'] > 0) {
+        rp_json(array('ok' => false, 'message' => '该账号仍绑定域名，请先移除域名或改用其他账号'));
+      }
+      $stmt = $pdo->prepare("DELETE FROM `resend_accounts` WHERE `id`=:id");
+      $stmt->execute(array(':id' => $id));
+      rp_json(array('ok' => true, 'message' => '账号已删除'));
+      break;
+
+    // 手动绑定：域名 → 账号
+    case 'assign':
+      $domain = trim((string)($_POST['domain'] ?? ''));
+      $aid = (int)($_POST['account_id'] ?? 0);
+      if ($domain === '' || $aid <= 0) rp_json(array('ok' => false, 'message' => '参数错误'));
+      $res = resend_pool_assign($domain, $aid);
+      rp_json($res);
+      break;
+
+    // 自动分配
+    case 'auto_assign':
+      $domains = isset($_POST['domains']) ? (array)$_POST['domains'] : array();
+      $domains = array_filter(array_map('trim', $domains));
+      if (empty($domains)) {
+        // 未指定则取 mailcow 中所有启用的域名
+        foreach ($pdo->query("SELECT `domain` FROM `domain` WHERE `active`=1 ORDER BY `domain`")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+          $domains[] = $r['domain'];
+        }
+      }
+      if (empty($domains)) rp_json(array('ok' => false, 'message' => '没有可分配的域名'));
+      $res = resend_pool_auto_assign($domains);
+      rp_json($res);
+      break;
+
+    // 移除域名
+    case 'remove_domain':
+      $domain = trim((string)($_POST['domain'] ?? ''));
+      if ($domain === '') rp_json(array('ok' => false, 'message' => '参数错误'));
+      $res = resend_pool_remove($domain);
+      rp_json($res);
+      break;
+
+    // 设置域名上限
+    case 'set_limit':
+      $n = resend_pool_set_domain_limit((int)($_POST['limit'] ?? 3));
+      rp_json(array('ok' => true, 'message' => '域名上限已设为 ' . $n, 'limit' => $n));
+      break;
+
+    // 设置 Cloudflare Token（用于自动写 DNS）
+    case 'set_cf_token':
+      $t = trim((string)($_POST['cf_token'] ?? ''));
+      if ($t === '') { $redis->del('RESEND_POOL_CF_TOKEN'); rp_json(array('ok' => true, 'message' => '已清除 Cloudflare Token')); }
+      $redis->set('RESEND_POOL_CF_TOKEN', $t);
+      rp_json(array('ok' => true, 'message' => 'Cloudflare Token 已保存'));
+      break;
+
+    // 同步验证状态
+    case 'sync':
+      rp_json(resend_pool_sync());
+      break;
+
+    // 读取某域名缓存的 DNS 记录
+    case 'records':
+      $domain = trim((string)($_GET['domain'] ?? ''));
+      $stmt = $pdo->prepare("SELECT `records_json`,`status` FROM `resend_domains` WHERE `domain`=:d LIMIT 1");
+      $stmt->execute(array(':d' => $domain));
+      $row = $stmt->fetch(PDO::FETCH_ASSOC);
+      if (!$row) rp_json(array('ok' => false, 'message' => '未找到'));
+      rp_json(array('ok' => true, 'status' => $row['status'], 'records' => json_decode($row['records_json'], true)));
+      break;
+
+    default:
+      http_response_code(400);
+      rp_json(array('ok' => false, 'message' => 'unknown action'));
+  }
+} catch (Throwable $e) {
+  http_response_code(500);
+  rp_json(array('ok' => false, 'message' => '服务器错误: ' . $e->getMessage()));
+}

@@ -1,0 +1,320 @@
+<div class="tab-pane fade" id="tab-config-resend-pool" role="tabpanel" aria-labelledby="tab-config-resend-pool">
+  <div class="card mb-4">
+    <div class="card-header d-flex fs-5">
+      <button class="btn d-md-none flex-grow-1 text-start" data-bs-target="#collapse-tab-resend-pool" data-bs-toggle="collapse" aria-controls="collapse-tab-resend-pool">
+        Resend 号池
+      </button>
+      <span class="d-none d-md-block">Resend 号池（多账号发信）</span>
+    </div>
+    <div id="collapse-tab-resend-pool" class="card-body collapse show" data-bs-parent="#admin-content">
+
+      <div class="alert alert-info">
+        <b>用途</b>：Resend 免费版每个账号只能绑定 3 个域名。把多个账号加入号池，
+        系统会自动把域名分配到大容量未满的账号，并把每个账号自动配置成 mailcow 的中继主机。
+        <br><b>注意</b>：添加的 API Key 必须是 <b>Full access</b> 权限。
+        Sending access 权限的 Key 无法管理域名，会被拒绝。
+      </div>
+
+      <!-- 顶部操作栏 -->
+      <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+        <button class="btn btn-sm btn-secondary" id="rp_refresh"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+        <button class="btn btn-sm btn-secondary" id="rp_sync"><i class="bi bi-cloud-download"></i> 同步验证状态</button>
+        <button class="btn btn-sm btn-primary" id="rp_auto_assign"><i class="bi bi-magic"></i> 自动分配全部域名</button>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <label class="mb-0 text-muted">每账号域名上限</label>
+          <input type="number" min="1" max="1000" class="form-control form-control-sm" id="rp_limit" style="width:6rem">
+          <button class="btn btn-sm btn-outline-secondary" id="rp_save_limit">保存</button>
+        </div>
+      </div>
+
+      <!-- 号池账号 -->
+      <legend>号池账号</legend><hr />
+      <div class="table-responsive">
+        <table class="table table-striped" id="rp_accounts_table">
+          <thead>
+            <tr>
+              <th style="width:16%">标签</th>
+              <th style="width:22%">API Key</th>
+              <th style="width:12%">已用 / 上限</th>
+              <th style="width:10%">状态</th>
+              <th style="width:24%">最近校验</th>
+              <th style="width:16%">操作</th>
+            </tr>
+          </thead>
+          <tbody id="rp_accounts_body">
+            <tr><td colspan="6" class="text-muted">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 添加账号 -->
+      <legend>添加账号</legend><hr />
+      <div class="row">
+        <div class="col-md-8">
+          <div class="mb-2">
+            <label for="rp_new_label">标签（可选）</label>
+            <input class="form-control" id="rp_new_label" placeholder="例如：账号 A、主号">
+          </div>
+          <div class="mb-2">
+            <label for="rp_new_key">Resend API Key（需 Full access 权限）</label>
+            <input class="form-control" id="rp_new_key" type="password" placeholder="re_xxxxxxxxxxxxxxxx">
+          </div>
+          <div class="mb-3">
+            <button class="btn btn-sm btn-outline-secondary" id="rp_test_key">测试 Key</button>
+            <button class="btn btn-sm btn-success" id="rp_add_account"><i class="bi bi-plus-lg"></i> 添加</button>
+          </div>
+          <div id="rp_key_result" class="mb-3"></div>
+        </div>
+      </div>
+
+      <!-- Cloudflare Token（可选，用于自动写 DNS） -->
+      <legend>Cloudflare Token（可选）</legend><hr />
+      <p class="text-muted mb-2">
+        配置后，绑定域名时会<b>自动把 Resend 需要的 DNS 记录写入 Cloudflare</b>，无需手工配置。
+        需要 Token 具备 <code>Zone → DNS → Edit</code> 权限。
+      </p>
+      <div class="row">
+        <div class="col-md-8">
+          <div class="input-group mb-3">
+            <input class="form-control" id="rp_cf_token" type="password" placeholder="Cloudflare API Token">
+            <button class="btn btn-sm btn-outline-secondary" id="rp_save_cf">保存</button>
+            <button class="btn btn-sm btn-outline-danger" id="rp_clear_cf">清除</button>
+          </div>
+          <div id="rp_cf_state" class="text-muted small mb-3"></div>
+        </div>
+      </div>
+
+      <!-- 域名绑定 -->
+      <legend>域名绑定</legend><hr />
+      <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+        <div class="input-group" style="max-width:32rem">
+          <input class="form-control" id="rp_assign_domain" placeholder="要绑定的域名，如 example.com">
+          <select class="form-select" id="rp_assign_account" style="max-width:14rem"></select>
+          <button class="btn btn-sm btn-success" id="rp_assign_btn">绑定</button>
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-striped" id="rp_domains_table">
+          <thead>
+            <tr>
+              <th style="width:26%">域名</th>
+              <th style="width:16%">所属账号</th>
+              <th style="width:14%">验证状态</th>
+              <th style="width:26%">DNS 记录</th>
+              <th style="width:18%">操作</th>
+            </tr>
+          </thead>
+          <tbody id="rp_domains_body">
+            <tr><td colspan="5" class="text-muted">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var RP_URL = '/inc/ajax/resend_pool.php';
+  var CSRF = (typeof csrf_token !== 'undefined') ? csrf_token : '';
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+    });
+  }
+  function post(data) {
+    return jQuery.ajax({
+      url: RP_URL, type: 'POST',
+      data: Object.assign({ csrf_token: CSRF }, data),
+      dataType: 'json'
+    });
+  }
+  function get(data) {
+    return jQuery.ajax({ url: RP_URL, type: 'GET', data: data, dataType: 'json' });
+  }
+  function statusBadge(s) {
+    var map = {
+      'verified': 'bg-success', 'partially_verified': 'bg-warning text-dark',
+      'pending': 'bg-info text-dark', 'not_started': 'bg-secondary',
+      'failed': 'bg-danger', 'temporary_failure': 'bg-danger'
+    };
+    var cls = map[s] || 'bg-secondary';
+    return '<span class="badge ' + cls + '">' + esc(s || '未知') + '</span>';
+  }
+
+  var state = { accounts: [], domains: [] };
+
+  function render(data) {
+    state.accounts = data.accounts || [];
+    state.domains = data.domains || [];
+
+    jQuery('#rp_limit').val(data.limit);
+    jQuery('#rp_cf_state').text(data.cf_configured ? '已配置（绑定域名时会自动写 DNS）' : '未配置（需手工把 DNS 记录加到 Cloudflare）');
+
+    // 账号表
+    if (!state.accounts.length) {
+      jQuery('#rp_accounts_body').html('<tr><td colspan="6" class="text-muted">还没有账号，请在下方添加</td></tr>');
+    } else {
+      var h = '';
+      state.accounts.forEach(function (a) {
+        var pct = a.domain_limit ? Math.round(100 * a.domain_count / a.domain_limit) : 0;
+        var bar = '<div class="progress" style="height:6px"><div class="progress-bar" style="width:' + pct + '%"></div></div>' +
+                  '<small class="text-muted">' + a.domain_count + ' / ' + a.domain_limit + '</small>';
+        h += '<tr>' +
+          '<td>' + esc(a.label) + '</td>' +
+          '<td><code>' + esc(a.api_key_masked) + '</code></td>' +
+          '<td>' + bar + '</td>' +
+          '<td>' + (a.active == 1 ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">停用</span>') + '</td>' +
+          '<td><small class="text-muted">' + esc(a.check_status || '—') + '</small></td>' +
+          '<td>' +
+            '<button class="btn btn-sm btn-outline-secondary rp-toggle" data-id="' + a.id + '" data-active="' + (a.active == 1 ? 0 : 1) + '">' + (a.active == 1 ? '停用' : '启用') + '</button> ' +
+            '<button class="btn btn-sm btn-outline-danger rp-del-acc" data-id="' + a.id + '">删除</button>' +
+          '</td></tr>';
+      });
+      jQuery('#rp_accounts_body').html(h);
+    }
+
+    // 账号下拉
+    var opts = '<option value="">选择账号…</option>';
+    state.accounts.filter(function (a) { return a.active == 1; }).forEach(function (a) {
+      opts += '<option value="' + a.id + '">' + esc(a.label) + '（' + a.domain_count + '/' + a.domain_limit + '）</option>';
+    });
+    jQuery('#rp_assign_account').html(opts);
+
+    // 域名表
+    if (!state.domains.length) {
+      jQuery('#rp_domains_body').html('<tr><td colspan="5" class="text-muted">还没有绑定任何域名</td></tr>');
+    } else {
+      var dh = '';
+      state.domains.forEach(function (d) {
+        var recs = [];
+        try { recs = JSON.parse(d.records_json || '[]') || []; } catch (e) { recs = []; }
+        var recText = recs.length
+          ? recs.map(function (r) { return '<div><code>' + esc(r.type) + '</code> ' + esc(r.name) + ' <span class="text-muted">' + esc(String(r.status || '')) + '</span></div>'; }).join('')
+          : '<span class="text-muted">—</span>';
+        dh += '<tr>' +
+          '<td><b>' + esc(d.domain) + '</b></td>' +
+          '<td>' + esc(d.account_label || ('#' + d.account_id)) + '</td>' +
+          '<td>' + statusBadge(d.status) + '</td>' +
+          '<td><small>' + recText + '</small></td>' +
+          '<td><button class="btn btn-sm btn-outline-danger rp-del-dom" data-domain="' + esc(d.domain) + '">移除</button></td>' +
+          '</tr>';
+      });
+      jQuery('#rp_domains_body').html(dh);
+    }
+  }
+
+  function load() {
+    get({ action: 'list' }).done(function (r) {
+      if (!r.ok) { jQuery('#rp_accounts_body').html('<tr><td colspan="6" class="text-danger">' + esc(r.message) + '</td></tr>'); return; }
+      render(r);
+    }).fail(function (x) {
+      jQuery('#rp_accounts_body').html('<tr><td colspan="6" class="text-danger">加载失败</td></tr>');
+    });
+  }
+
+  jQuery(function () {
+    load();
+
+    jQuery('#rp_refresh').on('click', load);
+
+    jQuery('#rp_test_key').on('click', function () {
+      var k = jQuery('#rp_new_key').val().trim();
+      if (!k) { jQuery('#rp_key_result').html('<span class="text-danger">请输入 API Key</span>'); return; }
+      jQuery('#rp_key_result').html('<span class="text-muted">测试中…</span>');
+      post({ action: 'check_key', api_key: k }).done(function (r) {
+        jQuery('#rp_key_result').html(r.ok
+          ? '<span class="text-success">✓ 有效（' + esc(r.message) + '）</span>'
+          : '<span class="text-danger">✗ ' + esc(r.message) + '</span>');
+      });
+    });
+
+    jQuery('#rp_add_account').on('click', function () {
+      var k = jQuery('#rp_new_key').val().trim();
+      var l = jQuery('#rp_new_label').val().trim();
+      if (!k) { jQuery('#rp_key_result').html('<span class="text-danger">请输入 API Key</span>'); return; }
+      jQuery('#rp_key_result').html('<span class="text-muted">添加中…</span>');
+      post({ action: 'add_account', api_key: k, label: l }).done(function (r) {
+        jQuery('#rp_key_result').html(r.ok
+          ? '<span class="text-success">✓ ' + esc(r.message) + '</span>'
+          : '<span class="text-danger">✗ ' + esc(r.message) + '</span>');
+        if (r.ok) { jQuery('#rp_new_key').val(''); jQuery('#rp_new_label').val(''); load(); }
+      });
+    });
+
+    jQuery('#rp_accounts_body').on('click', '.rp-toggle', function () {
+      post({ action: 'edit_account', id: jQuery(this).data('id'), active: jQuery(this).data('active') })
+        .done(function () { load(); });
+    });
+    jQuery('#rp_accounts_body').on('click', '.rp-del-acc', function () {
+      if (!confirm('确定删除该账号？')) return;
+      post({ action: 'delete_account', id: jQuery(this).data('id') }).done(function (r) {
+        if (!r.ok) alert(r.message);
+        load();
+      });
+    });
+
+    jQuery('#rp_save_limit').on('click', function () {
+      post({ action: 'set_limit', limit: jQuery('#rp_limit').val() }).done(function (r) {
+        alert(r.message); load();
+      });
+    });
+
+    jQuery('#rp_save_cf').on('click', function () {
+      post({ action: 'set_cf_token', cf_token: jQuery('#rp_cf_token').val() }).done(function (r) {
+        jQuery('#rp_cf_state').text(r.message);
+        jQuery('#rp_cf_token').val('');
+        load();
+      });
+    });
+    jQuery('#rp_clear_cf').on('click', function () {
+      post({ action: 'set_cf_token', cf_token: '' }).done(function (r) { load(); });
+    });
+
+    jQuery('#rp_assign_btn').on('click', function () {
+      var d = jQuery('#rp_assign_domain').val().trim();
+      var a = jQuery('#rp_assign_account').val();
+      if (!d || !a) { alert('请填写域名并选择账号'); return; }
+      jQuery(this).prop('disabled', true).text('绑定中…');
+      var btn = jQuery(this);
+      post({ action: 'assign', domain: d, account_id: a }).done(function (r) {
+        alert(r.message);
+        if (r.ok) jQuery('#rp_assign_domain').val('');
+        load();
+      }).always(function () { btn.prop('disabled', false).text('绑定'); });
+    });
+
+    jQuery('#rp_auto_assign').on('click', function () {
+      if (!confirm('将把 mailcow 中所有启用的域名自动分配到号池账号，继续？')) return;
+      var btn = jQuery(this);
+      btn.prop('disabled', true).text('分配中…');
+      post({ action: 'auto_assign' }).done(function (r) {
+        var msg = r.message || '';
+        if (r.assigned && r.assigned.length) msg += '\n\n成功：\n' + r.assigned.join('\n');
+        if (r.failed && r.failed.length) msg += '\n\n失败：\n' + r.failed.join('\n');
+        alert(msg);
+        load();
+      }).always(function () { btn.prop('disabled', false).html('<i class="bi bi-magic"></i> 自动分配全部域名'); });
+    });
+
+    jQuery('#rp_sync').on('click', function () {
+      var btn = jQuery(this);
+      btn.prop('disabled', true).text('同步中…');
+      post({ action: 'sync' }).done(function (r) {
+        alert('已同步 ' + (r.updated || 0) + ' 个域名' + ((r.errors && r.errors.length) ? '\n错误：' + r.errors.join('\n') : ''));
+        load();
+      }).always(function () { btn.prop('disabled', false).html('<i class="bi bi-cloud-download"></i> 同步验证状态'); });
+    });
+
+    jQuery('#rp_domains_body').on('click', '.rp-del-dom', function () {
+      var d = jQuery(this).data('domain');
+      if (!confirm('移除 ' + d + ' ？\n（Resend 侧会删除该域名，mailcow 侧解除中继绑定）')) return;
+      post({ action: 'remove_domain', domain: d }).done(function (r) {
+        alert(r.message); load();
+      });
+    });
+  });
+})();
+</script>
