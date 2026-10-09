@@ -11,6 +11,7 @@
  *   6. 出口 IP 黑名单状态（多 RBL 查询）
  *   7. 域名年龄（新注册域名会被 Gmail 等接收方审慎对待）
  *   8. 本机 rspamd 对该域出站邮件的实际打分（从 rspamd history 读取）
+ *   9. A 记录 / 网站可达性（根域与 www 是否有 A 记录；没有网站的域名会被 Gmail 等接收方审慎对待）
  *
  * 只读：不修改任何配置，仅查询 DNS 与本地 redis。
  * 返回 HTML 片段（与 dns_diagnostics.php 的约定一致）。
@@ -355,6 +356,10 @@ $age_days = dhc_domain_age_days($domain);
 
 // 8. rspamd 实际打分
 $scores = dhc_rspamd_scores($domain);
+
+// 9. A 记录（网站可达性）
+$a_records     = dhc_a($domain);
+$www_records   = dhc_a('www.' . $domain);
 ?>
 <div class="table-responsive">
   <table class="table table-striped">
@@ -463,6 +468,31 @@ $scores = dhc_rspamd_scores($domain);
             <?php if ($mx_points_here): ?>—— 一致<?php else: ?>—— <span class="text-warning">MX 未指向本机，请确认这是预期的</span><?php endif; ?>
           </small>
         <?php endif; ?>
+      </td>
+    </tr>
+
+    <!-- A 记录（网站可达性） -->
+    <tr>
+      <td>A 记录（网站可达性）</td>
+      <td><?php
+        if (!empty($a_records) || !empty($www_records)) { echo DHC_OK; }
+        else { echo DHC_WARN; }
+      ?></td>
+      <td>
+        <?php if (empty($a_records)): ?>
+          <span class="text-danger">无 A 记录</span>
+        <?php else: ?>
+          根域：<?php foreach ($a_records as $i => $ip): ?><?php if ($i > 0): ?>, <?php endif; ?><code><?=htmlspecialchars($ip);?></code><?php endforeach; ?>
+        <?php endif; ?><br>
+        www：<?php if (empty($www_records)): ?>无<?php else: ?><?php foreach ($www_records as $i => $ip): ?><?php if ($i > 0): ?>, <?php endif; ?><code><?=htmlspecialchars($ip);?></code><?php endforeach; ?><?php endif; ?><br>
+        <small>
+          <?php if (empty($a_records) && empty($www_records)): ?>
+            <span class="text-warning">该域名没有网站。</span>
+            Gmail 等接收方会参考域名是否有真实内容，完全没有网站的域名更容易被当作垃圾发信源；建议为该域名建站，或把 A / CNAME 指向已有网站。
+          <?php else: ?>
+            域名存在可访问的网站内容，对投递信誉有正面作用。
+          <?php endif; ?>
+        </small>
       </td>
     </tr>
 
@@ -575,7 +605,7 @@ $scores = dhc_rspamd_scores($domain);
   <small>
     <i class="bi bi-info-circle"></i>
     本页为只读诊断，不会修改任何配置。DNS 结果受解析器缓存影响，刚做的改动可能需等待 TTL 到期才会反映。<br>
-    说明：SPF / DKIM / DMARC 全部通过，并不保证邮件进入收件箱——接收方还会综合评估出口 IP 信誉、域名历史与收件人互动。
-    若三项全部通过但仍进垃圾箱，请优先检查「出口 IP 黑名单」「域名注册时长」与「本机出站打分」三项。
+    说明：SPF / DKIM / DMARC 全部通过，并不保证邮件进入收件箱——接收方还会综合评估出口 IP 信誉、域名历史、域名是否有网站内容，以及收件人互动。
+    若三项全部通过但仍进垃圾箱，请优先检查「A 记录（网站可达性）」「出口 IP 黑名单」「域名注册时长」与「本机出站打分」四项。
   </small>
 </p>

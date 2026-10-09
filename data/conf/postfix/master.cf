@@ -81,6 +81,15 @@ smtp_enforced_tls      unix  -       -       n       -       -       smtp
 smtp_via_transport_maps      unix  -       -       n       -       -       smtp
   -o smtp_sasl_password_maps=proxy:mysql:/opt/postfix/conf/sql/mysql_sasl_passwd_maps_transport_maps.cf
 
+# Cloudflare Email Sending relay (only supports implicit TLS on port 465)
+# Used by setting a relayhost of "smtp.mx.cloudflare.net:465" and a
+# transport_maps entry matching the sender domain to "smtp_cf465:".
+smtp_cf465      unix  -       -       n       -       -       smtp
+  -o smtp_tls_security_level=encrypt
+  -o smtp_tls_wrappermode=yes
+  -o syslog_name=cf465-smtp
+  -o smtp_sasl_password_maps=proxy:mysql:/opt/postfix/conf/sql/mysql_sasl_passwd_maps_sender_dependent.cf
+
 tlsproxy   unix  -       -       n       -       0       tlsproxy
 dnsblog    unix  -       -       n       -       0       dnsblog
 pickup     fifo  n       -       n       60      1       pickup

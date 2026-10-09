@@ -123,7 +123,19 @@ query = SELECT GROUP_CONCAT(transport SEPARATOR '') AS transport_maps
         )
         AND JSON_UNQUOTE(JSON_VALUE(attributes, '$.tls_enforce_out')) = '1'
         AND mailbox.active = '1'
-    ), 'smtp_enforced_tls:', 'smtp:') AS 'transport'
+    ), 'smtp_enforced_tls:',
+      IF(EXISTS(SELECT 1 FROM relayhosts
+        LEFT OUTER JOIN domain ON domain.relayhost = relayhosts.id
+        WHERE relayhosts.active = '1'
+          AND relayhosts.hostname LIKE '%%:465'
+          AND (domain.domain = '%d'
+            OR domain.domain IN (
+              SELECT target_domain FROM alias_domain
+                WHERE alias_domain = '%d'
+            )
+          )
+      ), 'smtp_cf465:', 'smtp:')
+    ) AS 'transport'
     UNION ALL
     SELECT COALESCE(
       (SELECT hostname FROM relayhosts
