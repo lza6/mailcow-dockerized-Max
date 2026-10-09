@@ -17,13 +17,35 @@ if (!isset($_SESSION['mailcow_cc_role']) || $_SESSION['mailcow_cc_role'] !== 'ad
   exit;
 }
 
+// ---- 权限：API 会话若为只读，则禁止一切写操作 ----
+// sessions.inc.php:65/68 会为 API Key 设置 mailcow_cc_api_access = rw|ro。
+// 只读 Key 不应能通过本端点修改配置。
+$is_api_session = isset($_SESSION['mailcow_cc_api']) && $_SESSION['mailcow_cc_api'] === true;
+$api_access = isset($_SESSION['mailcow_cc_api_access']) ? $_SESSION['mailcow_cc_api_access'] : '';
+
 $action = isset($_REQUEST['action']) ? (string)$_REQUEST['action'] : '';
 
-// ---- 写操作需要 CSRF ----
+// ---- 写操作清单 ----
 $write_actions = array('add_account', 'edit_account', 'delete_account', 'assign', 'auto_assign',
                        'remove_domain', 'set_limit', 'set_cf_token', 'sync');
-if (in_array($action, $write_actions, true)) {
-  if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['CSRF']['csrf_token'] ?? '', (string)$_POST['csrf_token'])) {
+$is_write = in_array($action, $write_actions, true);
+
+// 只读 API 会话禁止写操作
+if ($is_api_session && $is_write) {
+  http_response_code(403);
+  echo json_encode(array('ok' => false, 'message' => 'read-only API key cannot perform write operations'), JSON_UNESCAPED_UNICODE);
+  exit;
+}
+
+// ---- 写操作需要 CSRF ----
+// 注意：键名必须是 $_SESSION['CSRF']['TOKEN']（权威定义见 inc/footer.inc.php:77
+// 与 inc/sessions.inc.php:33-34）。此前误用 csrf_token 导致校验恒失败。
+// 另外，mailcow 的 session_check()（sessions.inc.php:157-168）在浏览器会话下
+// 已校验并 unset($_POST['csrf_token']) 并轮换 token，因此这里只对
+// 「未被框架校验过的路径」补校验 —— 即 API 会话。
+if ($is_write && $is_api_session) {
+  $sess_token = $_SESSION['CSRF']['TOKEN'] ?? '';
+  if (!isset($_POST['csrf_token']) || !hash_equals($sess_token, (string)$_POST['csrf_token'])) {
     http_response_code(403);
     echo json_encode(array('ok' => false, 'message' => 'CSRF token invalid'), JSON_UNESCAPED_UNICODE);
     exit;
@@ -104,9 +126,12 @@ try {
       if ((int)$stmt->fetch(PDO::FETCH_ASSOC)['c'] > 0) {
         rp_json(array('ok' => false, 'message' => '该账号仍绑定域名，请先移除域名或改用其他账号'));
       }
+      // 清理对应的 relayhosts 记录，避免遗留含旧 API Key 的孤儿行
+      $stmt = $pdo->prepare("DELETE FROM `relayhosts` WHERE `hostname` = :h AND `username` = :u");
+      $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => 'resend#' . $id));
       $stmt = $pdo->prepare("DELETE FROM `resend_accounts` WHERE `id`=:id");
       $stmt->execute(array(':id' => $id));
-      rp_json(array('ok' => true, 'message' => '账号已删除'));
+      rp_json(array('ok' => true, 'message' => '账号及其中继记录已删除'));
       break;
 
     // 手动绑定：域名 → 账号
@@ -175,6 +200,11 @@ try {
       rp_json(array('ok' => false, 'message' => 'unknown action'));
   }
 } catch (Throwable $e) {
+  // 不把内部异常消息回显给前端（可能含 SQL 片段、路径等敏感信息），
+  // 只记入错误日志，前端得到通用提示 + 可定位的追踪 ID。
+  $trace_id = bin2hex(random_bytes(6));
+  error_log('[resend_pool] trace=' . $trace_id . ' ' . $e->getMessage()
+    . ' @ ' . $e->getFile() . ':' . $e->getLine());
   http_response_code(500);
-  rp_json(array('ok' => false, 'message' => '服务器错误: ' . $e->getMessage()));
+  rp_json(array('ok' => false, 'message' => '服务器内部错误，请查看日志（追踪号 ' . $trace_id . '）'));
 }

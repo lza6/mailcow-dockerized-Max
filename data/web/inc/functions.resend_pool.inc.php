@@ -169,10 +169,13 @@ function resend_pool_ensure_relayhost($account) {
   global $pdo;
   $id = (int)$account['id'];
   $key = (string)$account['api_key'];
-  // 用固定 hostname + 账号 id 注释标记，便于识别
-  $label = 'Resend#' . $id;
+  // 关键：必须按账号 id 区分 username，否则多个账号会共用同一条
+  // relayhosts 记录、互相覆盖密码，导致「每账号独立发信」失效。
+  // mailcow 的 mysql_sasl_passwd_maps_sender_dependent.cf 取的是
+  // username/password 字段，因此 username 用 resend#<id> 即可各自独立。
+  $username = 'resend#' . $id;
   $stmt = $pdo->prepare("SELECT `id` FROM `relayhosts` WHERE `hostname` = :h AND `username` = :u LIMIT 1");
-  $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => 'resend'));
+  $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => $username));
   $found = $stmt->fetch(PDO::FETCH_ASSOC);
   if ($found) {
     // 已存在则同步密码与启用状态
@@ -181,7 +184,7 @@ function resend_pool_ensure_relayhost($account) {
     return (int)$found['id'];
   }
   $stmt = $pdo->prepare("INSERT INTO `relayhosts` (`hostname`, `username`, `password`, `active`) VALUES (:h, :u, :p, :a)");
-  $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => 'resend', ':p' => $key, ':a' => (int)$account['active']));
+  $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => $username, ':p' => $key, ':a' => (int)$account['active']));
   return (int)$pdo->lastInsertId();
 }
 
