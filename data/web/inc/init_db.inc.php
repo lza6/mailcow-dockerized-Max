@@ -4,7 +4,7 @@ function init_db_schema()
   try {
     global $pdo;
 
-    $db_version = "09102026_2300";
+    $db_version = "10102026_0400";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
@@ -194,6 +194,75 @@ function init_db_schema()
             "domain" => array("domain")
           ),
           "account_id" => array("account_id")
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "warmup_plans" => array(
+        "cols" => array(
+          "id" => "INT NOT NULL AUTO_INCREMENT",
+          "domain" => "VARCHAR(255) NOT NULL",
+          "sender" => "VARCHAR(255) NOT NULL",
+          "start_count" => "INT NOT NULL DEFAULT '2'",
+          "step" => "INT NOT NULL DEFAULT '1'",
+          "max_count" => "INT NOT NULL DEFAULT '20'",
+          "total_days" => "INT NOT NULL DEFAULT '30'",
+          "jitter_min" => "INT NOT NULL DEFAULT '30'",
+          "status" => "VARCHAR(32) NOT NULL DEFAULT 'active'",
+          "pause_reason" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          "started_on" => "DATE NOT NULL",
+          "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
+          "last_run" => "DATETIME(0) NULL DEFAULT NULL",
+          "sent_total" => "INT NOT NULL DEFAULT '0'",
+          "fail_total" => "INT NOT NULL DEFAULT '0'"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("id")
+          ),
+          "key" => array(
+            "domain" => array("domain"),
+            "sender" => array("sender")
+          )
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "warmup_recipients" => array(
+        "cols" => array(
+          "id" => "INT NOT NULL AUTO_INCREMENT",
+          "email" => "VARCHAR(255) NOT NULL",
+          "label" => "VARCHAR(128) NOT NULL DEFAULT ''",
+          "active" => "TINYINT(1) NOT NULL DEFAULT '1'",
+          "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("id")
+          ),
+          "key" => array(
+            "email" => array("email")
+          )
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "warmup_log" => array(
+        "cols" => array(
+          "id" => "INT NOT NULL AUTO_INCREMENT",
+          "plan_id" => "INT NOT NULL",
+          "run_at" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
+          "run_date" => "DATE NOT NULL",
+          "planned" => "INT NOT NULL DEFAULT '0'",
+          "sent" => "INT NOT NULL DEFAULT '0'",
+          "failed" => "INT NOT NULL DEFAULT '0'",
+          "detail" => "TEXT NULL DEFAULT NULL"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("id")
+          ),
+          "key" => array(
+            "plan_id" => array("plan_id"),
+            "run_date" => array("run_date")
+          )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
       ),

@@ -1,0 +1,144 @@
+<div class="tab-pane fade" id="tab-config-warmup" role="tabpanel" aria-labelledby="tab-config-warmup">
+  <div class="card mb-4">
+    <div class="card-header d-flex fs-5">
+      <button class="btn d-md-none flex-grow-1 text-start" data-bs-target="#collapse-tab-warmup" data-bs-toggle="collapse" aria-controls="collapse-tab-warmup">
+        养号（Warmup）
+      </button>
+      <span class="d-none d-md-block">养号（发件域信誉养成）</span>
+    </div>
+    <div id="collapse-tab-warmup" class="card-body collapse show" data-bs-parent="#admin-content">
+
+      <div class="alert alert-warning">
+        <b>用途</b>：按计划低速、分散地向"真实收件人池"发信，逐步建立发件域信誉。
+        <br><b>依据</b>：实测发现同一域<b>单独发 1 封能进收件箱，混在批量里就进垃圾箱</b> ——
+        落点主因是"短时间批量突发"，因此本功能的三个硬约束是：
+        <b>①每天量小 ②时刻随机分散 ③只发真实收件人</b>。
+        <br><b>重要</b>：系统无法代替真人<u>打开/回复</u>邮件。
+        收件人请在收到后<b>手动打开或回复一下</b>——这是 Gmail 最看重的正面信号。
+        <br><b>当前全局上限</b>：每日最多 <span id="wu_cap">-</span> 封；单次运行最多 <span id="wu_perrun">-</span> 封；
+        发送窗口 <span id="wu_window">-</span>（服务器时间 <span id="wu_srvtime">-</span>）。
+      </div>
+
+      <div class="alert alert-secondary">
+        <b>Google Postmaster Tools 对接（待你授权）</b>：Gmail 官方的域/IP 信誉评分只能通过
+        <b>你本人的 Google 账号</b>做 OAuth 授权后读取，系统无法代做。
+        授权后即可在此看到官方信誉分，用来判断养号是否见效。
+        <br>操作：前往
+        <a href="https://postmaster.google.com/" target="_blank" rel="noopener">postmaster.google.com</a>
+        → 添加你的发件域 → 验证所有权（在 Cloudflare 加一条 TXT）→ 生成 OAuth 凭据后填入。
+      </div>
+
+      <!-- 顶部操作栏 -->
+      <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+        <button class="btn btn-sm btn-secondary" id="wu_refresh"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <span class="text-muted small">今日已发 <b id="wu_sent_today">-</b></span>
+        </div>
+      </div>
+
+      <!-- 计划 -->
+      <legend>养号计划</legend><hr />
+      <div class="table-responsive">
+        <table class="table table-striped" id="wu_plans_table">
+          <thead>
+            <tr>
+              <th style="width:20%">发件域</th>
+              <th style="width:20%">发件邮箱</th>
+              <th style="width:8%">第几天</th>
+              <th style="width:10%">今日配额</th>
+              <th style="width:10%">今日已发</th>
+              <th style="width:12%">累计成功 / 失败</th>
+              <th style="width:9%">状态</th>
+              <th style="width:11%">操作</th>
+            </tr>
+          </thead>
+          <tbody id="wu_plans_body"></tbody>
+        </table>
+      </div>
+
+      <legend class="mt-4">新建计划</legend><hr />
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label mb-0 small">发件域</label>
+          <input type="text" class="form-control form-control-sm" id="wu_new_domain" placeholder="example.com">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label mb-0 small">发件邮箱</label>
+          <input type="text" class="form-control form-control-sm" id="wu_new_sender" placeholder="hello@example.com">
+        </div>
+        <div class="col-md-1">
+          <label class="form-label mb-0 small">起量</label>
+          <input type="number" min="1" max="50" class="form-control form-control-sm" id="wu_new_start" value="2">
+        </div>
+        <div class="col-md-1">
+          <label class="form-label mb-0 small">日增</label>
+          <input type="number" min="0" max="20" class="form-control form-control-sm" id="wu_new_step" value="1">
+        </div>
+        <div class="col-md-1">
+          <label class="form-label mb-0 small">上限</label>
+          <input type="number" min="1" max="200" class="form-control form-control-sm" id="wu_new_max" value="20">
+        </div>
+        <div class="col-md-1">
+          <label class="form-label mb-0 small">天数</label>
+          <input type="number" min="1" max="365" class="form-control form-control-sm" id="wu_new_days" value="30">
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-sm btn-primary w-100" id="wu_add_plan">新建计划</button>
+        </div>
+      </div>
+      <div class="form-text">
+        配额按线性递增：第 N 天 = 起量 + (N-1) × 日增，不超过"上限"。
+        例：起量 2、日增 1、上限 20 → 第 1 天 2 封、第 5 天 6 封、第 19 天起稳定 20 封。
+      </div>
+
+      <!-- 收件人池 -->
+      <legend class="mt-4">真实收件人池</legend><hr />
+      <div class="row g-2 align-items-end mb-2">
+        <div class="col-md-4">
+          <input type="text" class="form-control form-control-sm" id="wu_new_rcpt" placeholder="real-person@example.com">
+        </div>
+        <div class="col-md-4">
+          <input type="text" class="form-control form-control-sm" id="wu_new_rcpt_label" placeholder="备注（如：张三-会回复）">
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-sm btn-primary w-100" id="wu_add_rcpt">添加收件人</button>
+        </div>
+      </div>
+      <div class="form-text mb-2">
+        只向此列表中的地址发信。<b>请填真实会打开/回复的邮箱</b>——养号效果取决于真人互动，不是发送量。
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-striped" id="wu_rcpts_table">
+          <thead>
+            <tr>
+              <th style="width:40%">邮箱</th>
+              <th style="width:30%">备注</th>
+              <th style="width:15%">状态</th>
+              <th style="width:15%">操作</th>
+            </tr>
+          </thead>
+          <tbody id="wu_rcpts_body"></tbody>
+        </table>
+      </div>
+
+      <!-- 运行日志 -->
+      <legend class="mt-4">运行日志（最近 50 条）</legend><hr />
+      <div class="table-responsive">
+        <table class="table table-sm table-striped" id="wu_logs_table">
+          <thead>
+            <tr>
+              <th style="width:18%">时间</th>
+              <th style="width:20%">发件域</th>
+              <th style="width:10%">计划</th>
+              <th style="width:10%">实发</th>
+              <th style="width:10%">失败</th>
+              <th style="width:32%">明细</th>
+            </tr>
+          </thead>
+          <tbody id="wu_logs_body"></tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+</div>

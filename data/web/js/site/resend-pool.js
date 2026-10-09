@@ -15,8 +15,13 @@
   var RP_URL = '/inc/ajax/resend_pool.php';
 
   // csrf_token 由 admin.twig 注入到 window（var 声明在全局作用域）
+  // 服务端每次 POST 后会轮换 token，响应里带回新值，优先使用最新的
   function csrf() {
+    if (typeof window.__rp_csrf === 'string' && window.__rp_csrf) { return window.__rp_csrf; }
     return (typeof window.csrf_token !== 'undefined' && window.csrf_token) ? window.csrf_token : '';
+  }
+  function updateCsrf(d) {
+    if (d && typeof d.csrf === 'string' && d.csrf) { window.__rp_csrf = d.csrf; }
   }
 
   function esc(s) {
@@ -29,7 +34,7 @@
       url: RP_URL, type: 'POST',
       data: Object.assign({ csrf_token: csrf() }, data),
       dataType: 'json'
-    });
+    }).always(function (d) { updateCsrf(d); });
   }
   function get(data) {
     return jQuery.ajax({ url: RP_URL, type: 'GET', data: data, dataType: 'json' });

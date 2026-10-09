@@ -53,6 +53,12 @@ if ($is_write && $is_api_session) {
 }
 
 function rp_json($data) {
+  // mailcow 的 session_check() 在每次 POST 通过校验后轮换 CSRF token
+  // （sessions.inc.php:166）。页面注入的 window.csrf_token 是加载时的旧值，
+  // 若不回传新 token，前端第二次写操作必然 403。
+  if (!isset($data["csrf"]) && isset($_SESSION["CSRF"]["TOKEN"])) {
+    $data["csrf"] = $_SESSION["CSRF"]["TOKEN"];
+  }
   echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
   exit;
 }

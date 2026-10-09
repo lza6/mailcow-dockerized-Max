@@ -194,6 +194,12 @@ services:
         ofelia.job-exec.phpfpm_ldap_sync.schedule: "0 * * * * *"
         ofelia.job-exec.phpfpm_ldap_sync.no-overlap: "true"
         ofelia.job-exec.phpfpm_ldap_sync.command: "/bin/bash -c \"php /crons/ldap-sync.php || exit 0\""
+        # 养号调度器：每 5 分钟唤醒一次。真正的"今天该发几封、发没发"
+        # 由 warmup_run() 自行判断（当日随机时刻 + 当日配额），
+        # 因此高频唤醒不会导致多发包。
+        ofelia.job-exec.phpfpm_warmup.schedule: "0 */5 * * * *"
+        ofelia.job-exec.phpfpm_warmup.no-overlap: "true"
+        ofelia.job-exec.phpfpm_warmup.command: "/bin/bash -c \"php /crons/warmup.php || exit 0\""
       networks:
         mailcow-network:
           aliases:
