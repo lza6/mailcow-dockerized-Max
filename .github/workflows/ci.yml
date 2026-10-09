@@ -1,0 +1,113 @@
+name: CI
+
+# 触发条件
+on:
+  push:
+    branches: [main, develop, "feature/**", "hotfix/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+# 最小权限原则：默认只读，需要写权限的 job 单独声明
+permissions:
+  contents: read
+
+# 同一分支的重复推送取消上一次运行，节省额度
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 项目为 PHP + 原生 JS + Twig，无 composer.json / package.json
+  # 依赖已 vendor 到 data/web/inc/lib/vendor
+  PHP_VERSION: "8.2"
+  # Node 仅用于语言包校验脚本（仓库自带 node 校验逻辑）
+  NODE_VERSION: "20"
+
+jobs:
+  # ============================================================
+  # Stage 1: 静态质量检查
+  # 项目无 lint 配置，此处做「可落地的等价检查」：
+  #   - PHP 语法（php -l 全量）
+  #   - Twig 编译期检查（语法层面）
+  #   - JS 语法（node --check）
+  #   - 语言包完整性 + 占位符一致性（本项目核心资产）
+  # ============================================================
+  quality:
+    name: 质量检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, intl, json
+          coverage: none
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: PHP 语法检查（全量，排除 vendor）
+        run: |
+          set -euo pipefail
+          fail=0
+          count=0
+          while IFS= read -r f; do
+            count=$((count + 1))
+            if ! out=$(php -l "$f" 2>&1); then
+              echo "::error file=$f::$out"
+              fail=$((fail + 1))
+            fi
+          done < <(find data/web -name '*.php' -not -path '*/vendor/*' -not -path '*/lib/*')
+          echo "检查 $count 个 PHP 文件，失败 $fail 个"
+          [ "$fail" -eq 0 ]
+
+      - name: JS 语法检查
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            if ! node --check "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::JS 语法错误"
+              fail=$((fail + 1))
+            fi
+          done < <(find data/web/js -name '*.js' -not -path '*/build/*')
+          [ "$fail" -eq 0 ]
+
+      - name: 语言包完整性校验（本项目核心资产）
+        run: node .github/scripts/check-lang.cjs
+
+      - name: 占位符一致性校验
+        run: node .github/scripts/check-placeholders.cjs
+
+  # ============================================================
+  # Stage 2: 单元/集成测试
+  # 本项目无既有测试框架，此 job 运行「可验证真实行为」的检查：
+  #   - PHP 关键函数的行为测试（自建轻量断言，不引入新依赖）
+  #   - 语言包结构与回退逻辑验证
+  # ============================================================
+  test:
+    name: 测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, intl, json, pdo, pdo_mysql
+          coverage: none
+
+      - name: 运行 PHP 断言测试
+        run: php .github/scripts/test-runner.php
+
+      - name: 语言包回退逻辑测试
+        run: php .github/scripts/test-lang-fallback.php
