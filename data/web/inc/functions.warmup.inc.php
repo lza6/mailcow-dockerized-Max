@@ -24,12 +24,34 @@ define('WARMUP_GLOBAL_DAILY_CAP', 30);
 // 失败率阈值与最小样本（达到后才判定）
 define('WARMUP_PAUSE_FAIL_RATIO', 0.5);
 define('WARMUP_PAUSE_FAIL_MIN', 4);
-// 发送窗口：在每天的这个时间区间内随机（本地时区）
+// 发送窗口：在每天的这个时间区间内随机
 define('WARMUP_WINDOW_START_HOUR', 8);
 define('WARMUP_WINDOW_END_HOUR', 20);
 // 交给 postfix 的地址（容器网络别名）
 define('WARMUP_SMTP_HOST', 'postfix');
 define('WARMUP_SMTP_PORT', 25);
+
+/**
+ * 对齐时区 —— 必须做，否则"当日配额"会算错。
+ *
+ * 实测：php-fpm 容器的 TZ 环境变量是 America/New_York，但 PHP 的
+ * date_default_timezone 是 UTC（php.ini 未跟随 TZ），而 MySQL 用 SYSTEM
+ * 时区（= America/New_York）。两者相差若干小时，导致：
+ *   - warmup_day_index() 用 PHP 的 UTC 日期去减 started_on（MySQL 的本地日期），
+ *     在每日本地 20:00-24:00 这段会把天数多算一天，配额随之算错；
+ *   - 发送窗口 8:00-20:00 实际按 UTC 生效，偏离本地白天。
+ * 这里显式对齐到容器的 TZ，使 PHP 与 MySQL 使用同一时区。
+ */
+function warmup_sync_timezone() {
+  $tz = getenv('TZ');
+  if (!$tz && file_exists('/etc/timezone')) {
+    $tz = trim((string)@file_get_contents('/etc/timezone'));
+  }
+  if ($tz) {
+    @date_default_timezone_set($tz);
+  }
+}
+warmup_sync_timezone();
 
 /**
  * 取所有养号计划
