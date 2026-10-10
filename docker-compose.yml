@@ -147,6 +147,11 @@ services:
         - ./data/conf/dovecot/global_sieve_after:/global_sieve/after:z
         - ./data/assets/templates:/tpls:z
         - ./data/conf/nginx/:/etc/nginx/conf.d/:z
+        # cf-bridge 的日志（只读）。桥容器把 RELAY OK / RELAY FAIL 写到此目录，
+        # 后台「投递链路追踪」就能读到**完整链路**（含中继段）。
+        # 之所以用文件而非 docker logs：php-fpm 没有 docker socket（这是正确的
+        # 安全设计，给了等于给 Web 应用主机 root 权限），dockerapi 也没有 logs 路由。
+        - ./data/conf/cf-bridge/logs:/cf-bridge-logs:ro,z
       dns:
         - ${IPV4_NETWORK:-172.22.1}.254
       environment:

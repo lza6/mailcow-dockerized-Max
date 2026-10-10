@@ -4,7 +4,7 @@ function init_db_schema()
   try {
     global $pdo;
 
-    $db_version = "10102026_1800";
+    $db_version = "10102026_2200";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
@@ -262,6 +262,23 @@ function init_db_schema()
           "key" => array(
             "plan_id" => array("plan_id"),
             "run_date" => array("run_date")
+          )
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "resend_pool_settings" => array(
+        "cols" => array(
+          "id" => "INT NOT NULL AUTO_INCREMENT",
+          "skey" => "VARCHAR(64) NOT NULL",
+          "svalue" => "TEXT NULL DEFAULT NULL",
+          "modified" => "DATETIME(0) NOT NULL DEFAULT NOW(0) ON UPDATE NOW(0)"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("id")
+          ),
+          "key" => array(
+            "skey" => array("skey")
           )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"

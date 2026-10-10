@@ -1,12 +1,20 @@
 name: CD
 
 # 部署流水线
-#   develop 分支合并 → 自动部署到 staging
-#   main 分支合并    → 需人工审批 → 部署到 production
-#   workflow_dispatch → 手动触发，可选目标环境
+#   develop / master 分支合并 → 自动部署到 staging
+#   main 分支合并             → 需人工审批 → 部署到 production
+#   workflow_dispatch         → 手动触发，可选目标环境
+#
+# 分支说明：本地默认分支是 master，而 GitHub 目标仓库
+# （github.com/lza6/mailcow-dockerized-Max）使用 main，两者都要覆盖。
+# main 视为生产发布分支，master / develop 视为集成分支。
+#
+# 凭据说明：部署作业依赖 SSH 凭据 secrets（STAGING_SSH_KEY / PRODUCTION_SSH_KEY）。
+# 未配置时由 gate 作业探测并**跳过**对应部署作业（带 ::warning:: 提示），
+# 而不是让流水线以「必然失败」收场 —— 失败的绿灯比红灯更没人看。
 on:
   push:
-    branches: [develop, main]
+    branches: [master, develop, main]
   workflow_dispatch:
     inputs:
       environment:
@@ -34,6 +42,8 @@ jobs:
     timeout-minutes: 15
     outputs:
       target: ${{ steps.decide.outputs.target }}
+      staging: ${{ steps.creds.outputs.staging }}
+      production: ${{ steps.creds.outputs.production }}
     steps:
       - uses: actions/checkout@v4
 
@@ -46,6 +56,27 @@ jobs:
             echo "target=production" >> "$GITHUB_OUTPUT"
           else
             echo "target=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 部署凭据探测：缺失时跳过对应环境的部署，避免产出「必然失败」的红灯
+      - name: 检查部署凭据是否可用
+        id: creds
+        env:
+          STAGING_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          PRODUCTION_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$STAGING_KEY" ]; then
+            echo "staging=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "staging=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::未配置 secrets.STAGING_SSH_KEY，已跳过 staging 部署。"
+          fi
+          if [ -n "$PRODUCTION_KEY" ]; then
+            echo "production=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "production=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::未配置 secrets.PRODUCTION_SSH_KEY，已跳过 production 部署。"
           fi
 
       - name: 安装 PHP
@@ -79,7 +110,7 @@ jobs:
     name: 部署 staging
     runs-on: ubuntu-latest
     needs: gate
-    if: needs.gate.outputs.target == 'staging'
+    if: needs.gate.outputs.target == 'staging' && needs.gate.outputs.staging == 'true'
     timeout-minutes: 20
     environment:
       name: staging
@@ -120,7 +151,7 @@ jobs:
     name: 部署 production
     runs-on: ubuntu-latest
     needs: gate
-    if: needs.gate.outputs.target == 'production'
+    if: needs.gate.outputs.target == 'production' && needs.gate.outputs.production == 'true'
     timeout-minutes: 30
     # environment 配置了 Required reviewers 时会在此暂停等待审批
     environment:

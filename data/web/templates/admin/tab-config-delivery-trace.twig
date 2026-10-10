@@ -1,0 +1,124 @@
+<div class="tab-pane fade" id="tab-config-delivery-trace" role="tabpanel" aria-labelledby="tab-config-delivery-trace">
+  <div class="card mb-4">
+    <div class="card-header d-flex fs-5">
+      <button class="btn d-md-none flex-grow-1 text-start" data-bs-target="#collapse-tab-delivery-trace" data-bs-toggle="collapse" aria-controls="collapse-tab-delivery-trace">
+        投递链路追踪
+      </button>
+      <span class="d-none d-md-block">投递链路追踪（排查退信 / 延迟 / 被拒）</span>
+    </div>
+    <div id="collapse-tab-delivery-trace" class="card-body collapse show" data-bs-parent="#admin-content">
+
+      <div class="alert alert-secondary">
+        <b>用途</b>：输入 <b>Message-ID</b> 或 <b>收件人邮箱</b>，把散落在 postfix 日志里的同一个队列 ID
+        的所有行（接收 → 入队 → 中继 → 结果）按时间串起来，用于判断一封邮件到底走到了哪一步、为什么失败。
+        <br><b>填法</b>：Message-ID 可带尖括号也可不带（例如 <code>&lt;abc123@example.com&gt;</code> 或
+        <code>abc123@example.com</code>），至少 6 个字符；两个输入框至少填一个，也可以都填（取并集）。
+        <br><b>数据来源</b>：仅 <b>postfix</b> 日志（通过 mailcow 原生的日志读取函数），
+        行数上限 2000、日志保留行数由 <code>LOG_LINES</code> 决定，更早的邮件查不到。
+      </div>
+
+      <div class="alert alert-warning">
+        <b>cf-bridge 内部结果无法在此显示</b>：桥自己的日志行
+        （<code>RELAY OK from=… to=…</code> / <code>RELAY FAIL …</code>）只写在它自己的容器 stdout 里。
+        本部署中 Web UI 没有读取它的通路（dockerapi 无 logs 路由，<code>docker()</code> 无 logs 分支，
+        cf-bridge 也不在 <code>docker-compose.yml</code> 内），因此本页只能给出
+        <b>postfix 侧把邮件交给了哪个中继、SMTP 层是否成功</b>这一层信息。
+        <br>要看桥内部是否真的转发成功，请在宿主机执行：
+        <code>docker logs --tail 200 &lt;cf-bridge 容器名&gt;</code>。
+        <br>若中继行的 <code>status=sent</code> 但对方仍没收到，优先怀疑这一层 —— 参考
+        <code>helper-scripts/cf-email-bridge/README.md</code> 的 P0 记录。
+      </div>
+
+      <!-- 查询条件 -->
+      <div class="row g-2 align-items-end">
+        <div class="col-md-4">
+          <label class="form-label mb-0 small">Message-ID</label>
+          <input type="text" class="form-control form-control-sm" id="dt_mid" placeholder="&lt;abc123@example.com&gt;" autocomplete="off">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label mb-0 small">收件人邮箱</label>
+          <input type="text" class="form-control form-control-sm" id="dt_rcpt" placeholder="someone@example.com" autocomplete="off">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label mb-0 small">扫描日志行数</label>
+          <input type="number" min="50" max="2000" step="50" class="form-control form-control-sm" id="dt_lines" value="1000">
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-sm btn-primary w-100" id="dt_run"><i class="bi bi-search"></i> 追踪</button>
+        </div>
+      </div>
+      <div class="form-text">
+        两个条件都填时按「或」匹配：命中任一条件的行都会作为线索，并自动带出同一队列 ID 的全部后续日志。
+      </div>
+
+      <!-- 结果 -->
+      <div id="dt_results" class="mt-4">
+
+        <legend>结论</legend><hr />
+        <div class="d-flex flex-wrap align-items-center gap-3 mb-2">
+          <span class="text-muted small">最终判定</span><span id="dt_verdict"><span class="badge bg-secondary">未查询</span></span>
+          <span class="text-muted small">已扫描 <b id="dt_scanned">0</b> 行</span>
+          <span class="text-muted small">命中链路 <b id="dt_matches">0</b> 行</span>
+          <span class="badge bg-warning text-dark" id="dt_truncated" style="display:none;">结果被截断（超出单次上限）</span>
+        </div>
+        <div class="small text-muted mb-2">
+          中继目标：<span id="dt_targets">（无）</span>
+        </div>
+        <div class="alert alert-danger py-2 small" id="dt_note_error" style="display:none;"></div>
+        <div class="alert alert-warning py-2 small" id="dt_bridge_note" style="display:none;"></div>
+
+        <legend class="mt-4">阶段</legend><hr />
+        <div class="row row-cols-1 row-cols-md-3 g-2 mb-2" id="dt_steps"></div>
+        <div class="form-text mb-2">
+          发送 = 邮件被接收并进入队列（smtpd / cleanup / qmgr）；中继 = postfix 把邮件交给下一跳
+          （smtp / lmtp，本行同时给出中继目标与 status）；结果 = 退信类终态行与退信通知的聚合判定。
+          同一行可能同时计入「中继」与「结果」，两步不是互斥划分。
+        </div>
+
+        <legend class="mt-4">投递链路（按时间升序）</legend><hr />
+        <div class="table-responsive">
+          <table class="table table-sm table-striped" id="dt_timeline_table">
+            <thead>
+              <tr>
+                <th style="width:15%">时间</th>
+                <th style="width:8%">阶段</th>
+                <th style="width:14%">状态</th>
+                <th style="width:13%">程序</th>
+                <th style="width:15%">中继目标</th>
+                <th style="width:35%">日志内容</th>
+              </tr>
+            </thead>
+            <tbody id="dt_body">
+              <tr><td colspan="6" class="text-muted">尚未查询</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 最近日志（可折叠，供人工浏览） -->
+        <details class="mt-4">
+          <summary class="fs-6" style="cursor:pointer;">
+            最近日志（人工浏览，最多显示 <span id="dt_recent_count">0</span> 条）
+            <button class="btn btn-sm btn-outline-secondary ms-2" id="dt_reload_recent" type="button">重新读取</button>
+          </summary>
+          <hr />
+          <div class="table-responsive">
+            <table class="table table-sm table-striped">
+              <thead>
+                <tr>
+                  <th style="width:18%">时间</th>
+                  <th style="width:20%">程序</th>
+                  <th style="width:62%">内容</th>
+                </tr>
+              </thead>
+              <tbody id="dt_recent_body">
+                <tr><td colspan="3" class="text-muted">展开后自动加载</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+
+      </div>
+
+    </div>
+  </div>
+</div>

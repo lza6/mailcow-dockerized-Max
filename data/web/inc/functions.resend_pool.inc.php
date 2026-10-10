@@ -30,6 +30,68 @@ define('RESEND_RELAY_HOST', 'smtp.resend.com:587');
 /**
  * 读取号池配置的域名上限（存于 redis，可由管理员调整）
  */
+
+/* ------------------------------------------------------------------ *
+ * 持久化设置（MySQL 为准，redis 只做缓存）
+ *
+ * 背景：CF Token 原先只存 redis，redis 一清就丢，导致「自动写 DNS」
+ * 静默失效。改为落库到 resend_pool_settings，redis 仅作读缓存。
+ * ------------------------------------------------------------------ */
+
+/** 读一个设置项（MySQL） */
+function resend_pool_setting_get($pdo, $key) {
+  try {
+    $st = $pdo->prepare("SELECT `svalue` FROM `resend_pool_settings` WHERE `skey` = :k LIMIT 1");
+    $st->execute(array(":k" => (string)$key));
+    $v = $st->fetchColumn();
+    return ($v === false) ? null : (string)$v;
+  } catch (Exception $e) {
+    return null;
+  }
+}
+
+/** 写一个设置项（MySQL）。$value 为 null/空串表示删除 */
+function resend_pool_setting_set($pdo, $key, $value) {
+  $key = (string)$key;
+  try {
+    if ($value === null || $value === "") {
+      $st = $pdo->prepare("DELETE FROM `resend_pool_settings` WHERE `skey` = :k");
+      $st->execute(array(":k" => $key));
+      return true;
+    }
+    $st = $pdo->prepare("INSERT INTO `resend_pool_settings` (`skey`,`svalue`)
+                         VALUES (:k,:v)
+                         ON DUPLICATE KEY UPDATE `svalue` = VALUES(`svalue`)");
+    // 注意：skey 不是唯一键时 ON DUPLICATE 不生效，故先删后插，保证唯一
+    $del = $pdo->prepare("DELETE FROM `resend_pool_settings` WHERE `skey` = :k");
+    $del->execute(array(":k" => $key));
+    $st->execute(array(":k" => $key, ":v" => (string)$value));
+    return true;
+  } catch (Exception $e) {
+    return false;
+  }
+}
+
+/**
+ * 取 CF Token。**MySQL 为准**；命中后写入 redis 作短期缓存（10 分钟）。
+ * @return string 未配置返回空串
+ */
+function resend_pool_cf_token($pdo, $redis) {
+  $dbv = resend_pool_setting_get($pdo, "cf_api_token");
+  if ($dbv !== null && $dbv !== "") {
+    if ($redis) { try { $redis->setex("RESEND_POOL_CF_TOKEN", 600, $dbv); } catch (Exception $e) {} }
+    return $dbv;
+  }
+  // 兼容：库里没有但 redis 有（老部署）——把它迁回库里，实现一次性自动迁移
+  if ($redis) {
+    try {
+      $rv = $redis->get("RESEND_POOL_CF_TOKEN");
+      if ($rv) { resend_pool_setting_set($pdo, "cf_api_token", $rv); return (string)$rv; }
+    } catch (Exception $e) {}
+  }
+  return "";
+}
+
 function resend_pool_domain_limit() {
   global $redis;
   $v = $redis->get('RESEND_POOL_DOMAIN_LIMIT');
@@ -313,7 +375,7 @@ function resend_pool_assign($domain, $account_id) {
  */
 function resend_pool_write_dns($domain, $records) {
   global $redis;
-  $cf_token = $redis->get('RESEND_POOL_CF_TOKEN');
+  $cf_token = resend_pool_cf_token($pdo, $redis);
   if (!$cf_token || empty($records)) {
     return array('written' => 0, 'skipped' => true, 'reason' => '未配置 Cloudflare Token 或无记录');
   }

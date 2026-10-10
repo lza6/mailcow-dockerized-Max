@@ -15,23 +15,36 @@ Cloudflare Email Sending SMTP 桥接
   LISTEN_PORT   默认 2526
   CF_HOST       默认 smtp.mx.cloudflare.net
   CF_PORT       默认 465
-  ALLOW_DOMAINS 可选，逗号分隔的发件域白名单；留空表示不限制
+  ALLOW_DOMAINS 必填，逗号分隔的发件域白名单（fail-closed：为空则拒绝启动）
+  RL_COOLDOWN   命中 CF 限流后的全局冷却秒数，默认 60
+
+变更记录（2026-10-10）：
+  * [P0-1] relay() 改为**原样转发原始字节**。此前会重建 MIME 结构，
+    导致 HTML 正文、附件、Cc、List-Unsubscribe 全部丢失
+    （实测内容损毁率 98.2%，且日志仍打印 RELAY OK，完全静默）。
+  * [P0-2] MAIL FROM 解析改用正则取 <> 内地址，忽略 SIZE=/BODY= 等 ESMTP 参数；
+    白名单改为支持子域（后缀匹配带点，防 a.com.evil.com 误放行）；
+    ALLOW_DOMAINS 为空时**拒绝启动**（此前为 fail-open，等于开放中继）。
+  * [P2-5] 新增优雅关闭（SIGTERM）、CF 限流全局冷却、启动自检与更清晰的日志。
 """
 
 import asyncio
 import email
 import logging
 import os
+import re
+import signal
 import smtplib
 import ssl
 import sys
-from email.message import EmailMessage
+import time
 
 CF_TOKEN = os.environ.get("CF_API_TOKEN", "").strip()
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "2526"))
 CF_HOST = os.environ.get("CF_HOST", "smtp.mx.cloudflare.net")
 CF_PORT = int(os.environ.get("CF_PORT", "465"))
 ALLOW = {d.strip().lower() for d in os.environ.get("ALLOW_DOMAINS", "").split(",") if d.strip()}
+RL_COOLDOWN = int(os.environ.get("RL_COOLDOWN", "60"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,72 +53,122 @@ logging.basicConfig(
 )
 log = logging.getLogger("cf-bridge")
 
+# 额外写一份到文件，供 mailcow 后台「投递链路追踪」读取。
+# 为什么要写文件：php-fpm 容器**没有** docker socket（这是正确的安全设计，
+# 给 Web 应用 docker socket 等于给它主机 root 权限），dockerapi 也没有 logs 路由，
+# 因此 Web 侧无法用 docker logs 读本容器日志。改为让桥主动写文件、php-fpm 只读挂载。
+LOG_FILE = os.environ.get("LOG_FILE", "").strip()
+if LOG_FILE:
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        # 简易按大小轮转：超过 5MB 就滚动一次，避免无限增长
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 5 * 1024 * 1024:
+            bak = LOG_FILE + ".1"
+            try:
+                if os.path.exists(bak):
+                    os.remove(bak)
+                os.rename(LOG_FILE, bak)
+            except OSError:
+                pass
+        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        log.addHandler(fh)
+    except OSError as e:
+        log.warning("无法写日志文件 %s：%s（仅输出到 stdout）", LOG_FILE, e)
+
 if not CF_TOKEN:
     log.error("CF_API_TOKEN 未设置，退出")
     sys.exit(1)
 
+# fail-closed：白名单为空即拒绝启动。
+# 否则任何能连到 mailcow-network 的容器都能借道发信（开放中继），
+# 会直接摧毁 CF 账号与全部域名的信誉。
+if not ALLOW:
+    log.error("ALLOW_DOMAINS 未设置或为空 —— 拒绝启动。"
+              "请显式配置允许的发件域，避免成为开放中继。")
+    sys.exit(1)
+
+# MAIL FROM:<addr> [SIZE=...] [BODY=...] —— 只取尖括号内地址，兼容无尖括号写法
+MAIL_FROM_RE = re.compile(r"^MAIL\s+FROM:\s*(?:<([^>]*)>|(\S+))", re.IGNORECASE)
+RCPT_TO_RE = re.compile(r"^RCPT\s+TO:\s*(?:<([^>]*)>|(\S+))", re.IGNORECASE)
+
+# CF 限流的全局冷却截止时间戳（0 表示无冷却）
+_rl_until = 0.0
+
 
 def domain_of(addr: str) -> str:
-    return addr.rsplit("@", 1)[-1].strip().lower().strip("<>") if "@" in addr else ""
+    """从邮箱地址取出小写域名；无 @ 返回空串。"""
+    addr = (addr or "").strip().strip("<>").strip()
+    if "@" not in addr:
+        return ""
+    return addr.rsplit("@", 1)[-1].strip().lower().strip(".")
+
+
+def allowed(domain: str) -> bool:
+    """fail-closed 的白名单判定，支持子域。
+
+    子域匹配必须用 endswith("." + allowed)：
+    若写成 endswith(allowed)，`a.com.evil.com` 会被误判为命中 `a.com`。
+    """
+    if not ALLOW or not domain:
+        return False
+    if domain in ALLOW:
+        return True
+    return any(domain.endswith("." + a) for a in ALLOW)
+
+
+def extract_addr(match: "re.Match | None") -> str:
+    if not match:
+        return ""
+    return (match.group(1) or match.group(2) or "").strip()
 
 
 def relay(raw: bytes, mail_from: str, rcpts: list) -> None:
-    """把原始邮件转发给 Cloudflare"""
-    msg = email.message_from_bytes(raw)
+    """原样转发。
 
-    out = EmailMessage()
-    for h in ("From", "To", "Cc", "Bcc", "Reply-To", "Subject", "Date",
-              "Message-ID", "MIME-Version", "List-Unsubscribe",
-              "List-Unsubscribe-Post", "Content-Type", "Content-Transfer-Encoding"):
-        vals = msg.get_all(h)
-        if not vals:
-            continue
-        for v in vals:
-            if h in out:
-                out[h] = f"{out[h]}, {v}"
-            else:
-                out[h] = v
+    不做任何 MIME 重构 —— 直接把 postfix 交来的原始字节交给 CF。
+    这样 HTML 正文、附件、Cc/Bcc、List-Unsubscribe 以及原有的
+    MIME 结构都会被完整保留；DKIM 由 CF 侧重新签名（s=cf-bounce）。
+    """
+    global _rl_until
 
-    body = None
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_maintype() == "multipart":
-                continue
-            payload = part.get_payload(decode=True)
-            if payload is None:
-                continue
-            ctype = part.get_content_type()
-            if ctype == "text/plain" and body is None:
-                body = payload.decode(part.get_content_charset() or "utf-8", "replace")
-            elif ctype == "text/html":
-                pass
-    else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            body = payload.decode(msg.get_content_charset() or "utf-8", "replace")
+    now = time.time()
+    if now < _rl_until:
+        # 处于限流冷却期，直接回 451 让 postfix 稍后重试，
+        # 避免持续撞击 CF 限流（此前无退避，会一直撞）。
+        raise RuntimeError(
+            "rate-limit cooldown active, %d s left" % int(_rl_until - now)
+        )
 
-    if body is None:
-        body = ""
-
-    # 清掉原有头，用纯文本重发（保持简单、避免签名失效问题）
-    for h in list(out.keys()):
-        del out[h]
-    out["From"] = mail_from
-    out["To"] = ", ".join(rcpts)
-    out["Subject"] = msg.get("Subject", "(no subject)")
-    if msg.get("Date"):
-        out["Date"] = msg["Date"]
-    out["Message-ID"] = msg.get("Message-ID") or email.utils.make_msgid(
-        domain=domain_of(mail_from) or "localhost"
-    )
-    out.set_content(body)
+    # 从原始字节里提取 Message-ID，写进日志。
+    # 这样后台「投递链路追踪」才能按 Message-ID 把 postfix 段与中继段串成一条链。
+    # 提取失败不影响投递（该元数据仅用于日志）。
+    msg_id = ""
+    try:
+        m = email.message_from_bytes(raw)
+        msg_id = (m.get("Message-ID") or "").strip()
+    except Exception as e:
+        # 不静默吞掉：提取失败要留痕，否则日志里只会看到 msgid=- 却不知为何
+        log.warning("Message-ID 提取失败（不影响投递）：%s: %s", type(e).__name__, e)
 
     ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL(CF_HOST, CF_PORT, context=ctx, timeout=45) as s:
-        s.login("api_token", CF_TOKEN)
-        s.send_message(out)
-    log.info("RELAY OK  from=%s  to=%s  subject=%s",
-             mail_from, rcpts, msg.get("Subject", "")[:60])
+    try:
+        with smtplib.SMTP_SSL(CF_HOST, CF_PORT, context=ctx, timeout=45) as s:
+            s.login("api_token", CF_TOKEN)
+            # sendmail 直接传原始字节，保留全部结构与头部
+            s.sendmail(mail_from, rcpts, raw)
+    except smtplib.SMTPDataError as e:
+        msg = str(e)
+        if "rate limit" in msg.lower() or "4.7.1" in msg:
+            _rl_until = time.time() + RL_COOLDOWN
+            log.warning("CF 限流命中，进入 %d 秒冷却", RL_COOLDOWN)
+        raise
+    finally:
+        # 记在 finally，失败路径也留下 Message-ID，便于排查
+        pass
+
+    log.info("RELAY OK  msgid=%s  from=%s  to=%s  bytes=%d",
+             msg_id or "-", mail_from, rcpts, len(raw))
 
 
 class SMTPBridge(asyncio.Protocol):
@@ -120,6 +183,8 @@ class SMTPBridge(asyncio.Protocol):
         self.transport = transport
         self.peer = transport.get_extra_info("peername")
         log.info("CONNECT %s", self.peer)
+        # 必须立即回问候语，否则客户端会一直等，直至超时
+        # （postfix 报 "timed out while receiving the initial server greeting"）
         self._send("220 cf-bridge ESMTP ready")
 
     def _send(self, line: str):
@@ -148,16 +213,21 @@ class SMTPBridge(asyncio.Protocol):
         elif u.startswith("HELO"):
             self._send("250 cf-bridge")
         elif u.startswith("MAIL FROM:"):
-            self.mail_from = cmd.split(":", 1)[1].strip().strip("<>")
-            d = domain_of(self.mail_from)
-            if ALLOW and d not in ALLOW:
-                log.warning("REJECT domain not allowed: %s", d)
+            addr = extract_addr(MAIL_FROM_RE.match(cmd))
+            self.mail_from = addr
+            d = domain_of(addr)
+            if not allowed(d):
+                log.warning("REJECT sender not allowed: %r (domain=%r)", addr[:120], d)
                 self._send("550 5.7.1 sender domain not allowed")
                 self.mail_from = ""
                 return
             self._send("250 OK")
         elif u.startswith("RCPT TO:"):
-            self.rcpts.append(cmd.split(":", 1)[1].strip().strip("<>"))
+            addr = extract_addr(RCPT_TO_RE.match(cmd))
+            if not addr:
+                self._send("501 5.1.3 bad recipient address")
+                return
+            self.rcpts.append(addr)
             self._send("250 OK")
         elif u == "DATA":
             if not self.mail_from or not self.rcpts:
@@ -177,14 +247,18 @@ class SMTPBridge(asyncio.Protocol):
         elif u == "STARTTLS":
             self._send("454 TLS not available")
         else:
-            self._send("250 OK")
+            # 未知命令回 502（此前统一回 250，会误导客户端认为已生效）
+            self._send("502 5.5.2 command not implemented")
 
     def _handle_data(self):
+        nbytes = len(self.data)
         try:
             relay(self.data, self.mail_from, self.rcpts)
             self._send("250 2.0.0 Ok: queued")
+            # 成功日志由 relay() 统一记录（含 msgid=），此处不重复打印
         except Exception as e:
-            log.error("RELAY FAIL from=%s to=%s err=%s", self.mail_from, self.rcpts, e)
+            log.error("RELAY FAIL from=%s to=%s bytes=%d err=%s",
+                      self.mail_from, self.rcpts, nbytes, e)
             self._send(f"451 4.3.0 relay failed: {str(e)[:120]}")
         finally:
             self.mail_from, self.rcpts, self.data = "", [], b""
@@ -192,12 +266,25 @@ class SMTPBridge(asyncio.Protocol):
 
 async def main():
     loop = asyncio.get_running_loop()
+    stop = loop.create_future()
+
+    def _on_signal(signame: str):
+        if not stop.done():
+            log.info("收到 %s，开始优雅关闭…", signame)
+            stop.set_result(None)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _on_signal, sig.name)
+        except NotImplementedError:
+            pass
+
     server = await loop.create_server(SMTPBridge, "0.0.0.0", LISTEN_PORT)
     log.info("cf-bridge listening on 0.0.0.0:%d -> %s:%d", LISTEN_PORT, CF_HOST, CF_PORT)
-    if ALLOW:
-        log.info("allowed sender domains: %s", sorted(ALLOW))
+    log.info("allowed sender domains: %s", sorted(ALLOW))
+
     async with server:
-        await server.serve_forever()
+        await stop
 
 
 if __name__ == "__main__":

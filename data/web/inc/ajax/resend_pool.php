@@ -73,7 +73,7 @@ try {
         'accounts' => resend_pool_accounts(false),
         'domains' => resend_pool_domains(),
         'limit' => resend_pool_domain_limit(),
-        'cf_configured' => (bool)$redis->get('RESEND_POOL_CF_TOKEN'),
+        'cf_configured' => (resend_pool_cf_token($pdo, $redis) !== ''),
       ));
       break;
 
@@ -181,8 +181,16 @@ try {
     // 设置 Cloudflare Token（用于自动写 DNS）
     case 'set_cf_token':
       $t = trim((string)($_POST['cf_token'] ?? ''));
-      if ($t === '') { $redis->del('RESEND_POOL_CF_TOKEN'); rp_json(array('ok' => true, 'message' => '已清除 Cloudflare Token')); }
-      $redis->set('RESEND_POOL_CF_TOKEN', $t);
+      // 落库到 MySQL（持久）+ redis 短期缓存。此前只写 redis，redis 一清 token 就丢。
+      $db_ok = resend_pool_setting_set($pdo, 'cf_api_token', $t);
+      if ($redis) {
+        try {
+          if ($t === '') { $redis->del('RESEND_POOL_CF_TOKEN'); }
+          else { $redis->setex('RESEND_POOL_CF_TOKEN', 600, $t); }
+        } catch (Exception $e) {}
+      }
+      if (!$db_ok) { rp_json(array('ok' => false, 'message' => 'Token 写入数据库失败')); }
+      if ($t === '') { rp_json(array('ok' => true, 'message' => '已清除 Cloudflare Token（含数据库）')); }
       rp_json(array('ok' => true, 'message' => 'Cloudflare Token 已保存'));
       break;
 

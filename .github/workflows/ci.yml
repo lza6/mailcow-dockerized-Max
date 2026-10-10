@@ -1,11 +1,14 @@
 name: CI
 
 # 触发条件
+#   本仓库本地默认分支为 master，而推送到 GitHub 目标仓库
+#   （github.com/lza6/mailcow-dockerized-Max）使用的分支为 main，
+#   因此两者都必须覆盖，否则总有一条工作分支拿不到质量门禁。
 on:
   push:
-    branches: [main, develop, "feature/**", "hotfix/**"]
+    branches: [master, main, develop, "feature/**", "hotfix/**"]
   pull_request:
-    branches: [main, develop]
+    branches: [master, main, develop]
   workflow_dispatch:
 
 # 最小权限原则：默认只读，需要写权限的 job 单独声明

@@ -12,6 +12,7 @@ $fido2_data = fido2(array("action" => "get_friendly_names"));
 $js_minifier->add('/web/js/site/admin.js');
 $js_minifier->add('/web/js/site/resend-pool.js');
 $js_minifier->add('/web/js/site/warmup.js');
+$js_minifier->add('/web/js/site/delivery-trace.js');
 $js_minifier->add('/web/js/presets/rspamd.js');
 $js_minifier->add('/web/js/site/pwgen.js');
 
