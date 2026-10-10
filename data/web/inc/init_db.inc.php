@@ -4,7 +4,7 @@ function init_db_schema()
   try {
     global $pdo;
 
-    $db_version = "10102026_0400";
+    $db_version = "10102026_1800";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
@@ -262,6 +262,31 @@ function init_db_schema()
           "key" => array(
             "plan_id" => array("plan_id"),
             "run_date" => array("run_date")
+          )
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "admin_audit_log" => array(
+        "cols" => array(
+          "id" => "INT NOT NULL AUTO_INCREMENT",
+          "actor" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          "actor_ip" => "VARCHAR(64) NOT NULL DEFAULT ''",
+          "action" => "VARCHAR(64) NOT NULL",
+          "target_type" => "VARCHAR(32) NOT NULL DEFAULT ''",
+          "target" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          "result" => "VARCHAR(16) NOT NULL DEFAULT 'ok'",
+          "detail" => "TEXT NULL DEFAULT NULL",
+          "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("id")
+          ),
+          "key" => array(
+            "actor" => array("actor"),
+            "action" => array("action"),
+            "target" => array("target"),
+            "created" => array("created")
           )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"

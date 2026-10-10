@@ -63,6 +63,9 @@
 
         {% if mailcow_cc_role %}
         {% if mailcow_cc_role == 'admin' %}
+        <li class="nav-item">
+          <a href="/admin/overview" class="nav-link {% if is_uri('overview') %}active{% endif %}">域名总览</a>
+        </li>
         <li class="nav-item dropdown">
           <a href="#" class="nav-link dropdown-toggle" data-bs-toggle="dropdown" role="button" aria-expanded="false">{{ lang.header.mailcow_system }}</a>
           <ul class="dropdown-menu">

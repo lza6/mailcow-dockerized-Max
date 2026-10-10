@@ -1,0 +1,184 @@
+{% extends 'base.twig' %}
+
+{% block content %}
+{# csrf_token 必须注入：本页继承 base.twig 而非 admin.twig，
+   而 admin.twig 里才有这个定义；缺了它前端写操作会因 CSRF 校验失败而全部 403 #}
+<script>var csrf_token = '{{ csrf_token }}';</script>
+
+<div class="container-fluid">
+
+  <!-- ========== 顶部指标条 ========== -->
+  <div class="row g-2 mb-3" id="ov_stats">
+    <div class="col-6 col-md-3">
+      <div class="card h-100"><div class="card-body py-2">
+        <div class="text-muted small">域名</div>
+        <div class="fs-4" id="ov_stat_domains">—</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card h-100"><div class="card-body py-2">
+        <div class="text-muted small">邮箱账号</div>
+        <div class="fs-4" id="ov_stat_mailboxes">—</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card h-100"><div class="card-body py-2">
+        <div class="text-muted small">异常域名</div>
+        <div class="fs-4" id="ov_stat_abnormal">—</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card h-100"><div class="card-body py-2">
+        <div class="text-muted small">今日已发（养号）</div>
+        <div class="fs-4" id="ov_stat_today">—</div>
+      </div></div>
+    </div>
+  </div>
+
+  <div id="ov_notice"></div>
+
+  <!-- ========== 域名总览 ========== -->
+  <div class="card mb-3">
+    <div class="card-header d-flex flex-wrap align-items-center gap-2">
+      <span class="fs-5">域名总览</span>
+      <span class="text-muted small">收信 MX / 认证 / 中继 / 邮箱 / 养号，一屏看全</span>
+      <div class="ms-auto d-flex gap-2">
+        <button class="btn btn-sm btn-secondary" id="ov_refresh"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+        <button class="btn btn-sm btn-primary" id="ov_check_all"><i class="bi bi-clipboard-check"></i> 一键体检全部</button>
+      </div>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0 align-middle">
+          <thead class="table-light">
+            <tr>
+              <th style="width:20%">域名</th>
+              <th style="width:14%">收信 MX</th>
+              <th style="width:16%">认证</th>
+              <th style="width:12%">出站中继</th>
+              <th style="width:7%">邮箱</th>
+              <th style="width:11%">养号</th>
+              <th style="width:20%">操作</th>
+            </tr>
+          </thead>
+          <tbody id="ov_domains_body">
+            <tr><td colspan="7" class="text-center text-muted py-4">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 邮箱账号 ========== -->
+  <div class="card mb-3">
+    <div class="card-header d-flex flex-wrap align-items-center gap-2">
+      <span class="fs-5">邮箱账号</span>
+      <span class="text-muted small">
+        ⚠️ 密码为 bcrypt 单向哈希，<b>无法显示明文</b>；可用「重置密码」生成新密码（只显示一次）
+      </span>
+      <div class="ms-auto d-flex gap-2">
+        <input type="text" class="form-control form-control-sm" id="ov_mbox_filter"
+               placeholder="筛选邮箱…" style="width:14rem">
+      </div>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive" style="max-height:32rem;overflow:auto">
+        <table class="table table-sm table-hover mb-0 align-middle">
+          <thead class="table-light" style="position:sticky;top:0">
+            <tr>
+              <th style="width:30%">邮箱</th>
+              <th style="width:18%">所属域</th>
+              <th style="width:10%">状态</th>
+              <th style="width:12%">配额</th>
+              <th style="width:30%">操作</th>
+            </tr>
+          </thead>
+          <tbody id="ov_mbox_body">
+            <tr><td colspan="5" class="text-center text-muted py-4">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 一键添加 ========== -->
+  <div class="row g-3 mb-3">
+    <div class="col-md-6">
+      <div class="card h-100">
+        <div class="card-header">一键添加域名</div>
+        <div class="card-body">
+          <div class="mb-2">
+            <label class="form-label mb-0 small">域名</label>
+            <input type="text" class="form-control form-control-sm" id="ov_new_domain" placeholder="example.com">
+          </div>
+          <div class="mb-2">
+            <label class="form-label mb-0 small">备注（可选）</label>
+            <input type="text" class="form-control form-control-sm" id="ov_new_domain_desc">
+          </div>
+          <button class="btn btn-sm btn-primary" id="ov_add_domain">添加域名</button>
+          <div class="form-text">
+            添加后会<b>自动生成 DKIM 密钥（2048bit）</b>。之后到「配置 → DKIM 密钥」复制 TXT 值发布到 DNS。
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="card h-100">
+        <div class="card-header">一键添加邮箱</div>
+        <div class="card-body">
+          <div class="mb-2">
+            <label class="form-label mb-0 small">邮箱地址</label>
+            <input type="text" class="form-control form-control-sm" id="ov_new_mbox" placeholder="user@example.com">
+          </div>
+          <div class="row g-2 mb-2">
+            <div class="col-7">
+              <label class="form-label mb-0 small">密码</label>
+              <input type="text" class="form-control form-control-sm" id="ov_new_mbox_pw" placeholder="留空则自动生成">
+            </div>
+            <div class="col-5 d-flex align-items-end">
+              <button class="btn btn-sm btn-outline-secondary w-100" id="ov_gen_pw">生成随机</button>
+            </div>
+          </div>
+          <div class="mb-2">
+            <label class="form-label mb-0 small">配额（MB，0 = 不限）</label>
+            <input type="number" class="form-control form-control-sm" id="ov_new_mbox_quota" value="0" min="0">
+          </div>
+          <button class="btn btn-sm btn-primary" id="ov_add_mbox">添加邮箱</button>
+          <div class="form-text">域名必须已在 mailcow 中，否则会先提示添加域名。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 操作日志 ========== -->
+  <div class="card mb-4">
+    <div class="card-header d-flex align-items-center gap-2">
+      <span class="fs-5">操作日志（审计）</span>
+      <span class="text-muted small">谁 / 何时 / 对什么 / 做了什么 / 结果</span>
+      <div class="ms-auto">
+        <button class="btn btn-sm btn-secondary" id="ov_refresh_audit"><i class="bi bi-arrow-clockwise"></i></button>
+      </div>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive" style="max-height:24rem;overflow:auto">
+        <table class="table table-sm table-hover mb-0 align-middle">
+          <thead class="table-light" style="position:sticky;top:0">
+            <tr>
+              <th style="width:18%">时间</th>
+              <th style="width:16%">操作者</th>
+              <th style="width:18%">动作</th>
+              <th style="width:24%">对象</th>
+              <th style="width:8%">结果</th>
+              <th style="width:16%">详情</th>
+            </tr>
+          </thead>
+          <tbody id="ov_audit_body">
+            <tr><td colspan="6" class="text-center text-muted py-4">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
