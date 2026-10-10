@@ -254,3 +254,7 @@ docker compose logs --since 24h postfix-mailcow
 | 出站过滤/黑名单配置 | `data/conf/postfix/main.cf`、`data/conf/rspamd/` |
 | 反垃圾出站/入站策略 | `data/conf/rspamd/local.d/`、`data/conf/rspamd/override.d/` |
 | 备份/恢复 | `helper-scripts/backup_and_restore.sh` |
+| **项目文档总目录** | `docs/README.md`（投递与信誉 / 接入指南 / 功能设计 / 运维与工程） |
+| 养号（Warmup）功能 | `data/web/inc/functions.warmup.inc.php`、`docs/03-功能设计/养号功能-任务台账.md` |
+| Resend 号池功能 | `data/web/inc/functions.resend_pool.inc.php`、`docs/03-功能设计/Resend号池-*.md` |
+| 投递诊断结论 | `docs/01-投递与信誉/15个根域逐域验证报告.md` |
