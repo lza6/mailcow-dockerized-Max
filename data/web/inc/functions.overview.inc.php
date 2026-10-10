@@ -127,6 +127,170 @@ function ov_daily_baseline($pdo, $counts) {
  * @param bool $ageCacheOnly 域龄是否只读缓存。
  *        页面传 true（保证首屏零网络 I/O）；「体检」传 false 以刷新域龄。
  */
+/**
+ * 中继号池（Resend）—— 账号、域名绑定、容量与额度汇总。
+ *
+ * 只读数据库，**不发外部请求**（Resend/CF 的实时状态由「同步」动作刷新后落库）。
+ * CF Token 直接从 resend_pool_settings 读，避免为一屏展示去加载整个号池库。
+ */
+function ov_relay_pool($pdo, $redis) {
+  $limit = 3;
+  try {
+    $v = $redis ? $redis->get('RESEND_POOL_DOMAIN_LIMIT') : false;
+    if ($v !== false && $v !== null && (int)$v > 0) { $limit = (int)$v; }
+  } catch (Exception $e) {}
+
+  $accounts = array();
+  $used = array();
+  try {
+    foreach ($pdo->query("SELECT `account_id`, COUNT(*) AS c FROM `resend_domains` WHERE `active`=1 GROUP BY `account_id`")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+      $used[(int)$r['account_id']] = (int)$r['c'];
+    }
+    $rows = $pdo->query("SELECT `id`,`label`,`api_key`,`daily_quota`,`active`,`last_check`,`check_status`
+                           FROM `resend_accounts` ORDER BY `active` DESC, `id` ASC")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as $r) {
+      $k = (string)$r['api_key'];
+      $accounts[] = array(
+        'id'           => (int)$r['id'],
+        'label'        => (string)$r['label'],
+        // 只展示掩码；明文 Key 永远不下发到页面
+        'key_masked'   => $k === '' ? '' : (substr($k, 0, 8) . '…' . substr($k, -4)),
+        'key_len'      => strlen($k),
+        'daily_quota'  => (int)$r['daily_quota'],
+        'active'       => (int)$r['active'],
+        'domains'      => isset($used[(int)$r['id']]) ? $used[(int)$r['id']] : 0,
+        'limit'        => $limit,
+        'last_check'   => (string)$r['last_check'],
+        'check_status' => (string)$r['check_status'],
+      );
+    }
+  } catch (Exception $e) { $accounts = array(); }
+
+  $bindings = array();
+  try {
+    $rows = $pdo->query("SELECT d.`id`, d.`domain`, d.`account_id`, d.`status`, d.`active`, d.`verified_at`,
+                                a.`label` AS `account_label`
+                           FROM `resend_domains` d
+                           LEFT JOIN `resend_accounts` a ON a.`id` = d.`account_id`
+                          ORDER BY d.`domain` ASC")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as $r) {
+      $bindings[] = array(
+        'id' => (int)$r['id'], 'domain' => (string)$r['domain'],
+        'account_id' => (int)$r['account_id'], 'account_label' => (string)$r['account_label'],
+        'status' => (string)$r['status'], 'active' => (int)$r['active'],
+        'verified_at' => (string)$r['verified_at'],
+      );
+    }
+  } catch (Exception $e) { $bindings = array(); }
+
+  $activeN = 0; $cap = 0; $usedTotal = 0; $quotaTotal = 0;
+  foreach ($accounts as $a) {
+    if ($a['active'] === 1) {
+      $activeN++;
+      $cap        += $limit;          // 号池总容量 = 启用账号数 × 单账号域名上限
+      $usedTotal  += $a['domains'];
+      $quotaTotal += $a['daily_quota'];
+    }
+  }
+
+  $cfToken = '';
+  try {
+    $st = $pdo->prepare("SELECT `svalue` FROM `resend_pool_settings` WHERE `skey` = 'cf_api_token' LIMIT 1");
+    $st->execute();
+    $cfToken = (string)$st->fetchColumn();
+  } catch (Exception $e) {}
+
+  return array(
+    'limit'           => $limit,
+    'accounts'        => $accounts,
+    'bindings'        => $bindings,
+    'active_accounts' => $activeN,
+    'capacity'        => $cap,
+    'used'            => $usedTotal,
+    'left'            => max(0, $cap - $usedTotal),
+    'quota_total'     => $quotaTotal,
+    'cf_configured'   => $cfToken !== '',
+    'cf_masked'       => $cfToken === '' ? '' : (substr($cfToken, 0, 6) . '…' . substr($cfToken, -4)),
+    'cf_len'          => strlen($cfToken),
+  );
+}
+
+/**
+ * 养号（Warmup）状态 —— 计划、收件人池、发送日志。
+ *
+ * 复用 functions.warmup.inc.php 的 warmup_day_index() / warmup_daily_quota()，
+ * **不复制公式**：配额算法一旦调整，复制出来的副本必然与调度器漂移，
+ * 会出现「界面显示今天该发 5 封、实际调度器按 3 封发」这种最难查的不一致。
+ */
+function ov_warmup_state($pdo) {
+  if (!function_exists('warmup_daily_quota')) {
+    require_once __DIR__ . '/functions.warmup.inc.php';
+  }
+  $plans = array(); $recipients = array(); $logs = array();
+  $sentToday = 0; $sentTotal = 0; $failTotal = 0;
+
+  try {
+    $rows = $pdo->query("SELECT p.*,
+        COALESCE((SELECT SUM(l.`sent`)   FROM `warmup_log` l WHERE l.`plan_id`=p.`id` AND l.`run_date`=CURDATE()),0) AS `sent_today`,
+        COALESCE((SELECT COUNT(*)        FROM `warmup_log` l WHERE l.`plan_id`=p.`id` AND l.`run_date`=CURDATE()),0) AS `ran_today`,
+        COALESCE((SELECT SUM(l.`sent`)   FROM `warmup_log` l WHERE l.`plan_id`=p.`id`),0) AS `sent_all`,
+        COALESCE((SELECT SUM(l.`failed`) FROM `warmup_log` l WHERE l.`plan_id`=p.`id`),0) AS `fail_all`
+      FROM `warmup_plans` p ORDER BY p.`id` ASC")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as $p) {
+      $day = warmup_day_index($p);
+      $plans[] = array(
+        'id' => (int)$p['id'], 'domain' => (string)$p['domain'], 'sender' => (string)$p['sender'],
+        'status' => (string)$p['status'], 'pause_reason' => (string)$p['pause_reason'],
+        'start_count' => (int)$p['start_count'], 'step' => (int)$p['step'],
+        'max_count' => (int)$p['max_count'], 'total_days' => (int)$p['total_days'],
+        'started_on' => (string)$p['started_on'],
+        'day' => $day, 'day_quota' => warmup_daily_quota($p),
+        'days_left' => max(0, (int)$p['total_days'] - $day),
+        'sent_today' => (int)$p['sent_today'],
+        // 今天调度器是否真的跑过 —— 只靠 sent_today 无法区分
+        // 「配额为 0 没发」和「调度器压根没跑」，必须单独给出
+        'ran_today' => ((int)$p['ran_today'] > 0),
+        'sent_all' => (int)$p['sent_all'], 'fail_all' => (int)$p['fail_all'],
+        'last_run' => (string)$p['last_run'],
+      );
+      $sentTotal += (int)$p['sent_all'];
+      $failTotal += (int)$p['fail_all'];
+    }
+  } catch (Exception $e) {}
+
+  try {
+    foreach ($pdo->query("SELECT `id`,`email`,`label`,`active` FROM `warmup_recipients` ORDER BY `id` ASC")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+      $recipients[] = array('id' => (int)$r['id'], 'email' => (string)$r['email'],
+                            'label' => (string)$r['label'], 'active' => (int)$r['active']);
+    }
+  } catch (Exception $e) {}
+
+  try {
+    $logs = $pdo->query("SELECT l.`id`, l.`plan_id`, l.`run_at`, l.`run_date`, l.`planned`,
+                                l.`sent`, l.`failed`, l.`detail`, p.`sender`, p.`domain`
+                           FROM `warmup_log` l
+                           LEFT JOIN `warmup_plans` p ON p.`id` = l.`plan_id`
+                          ORDER BY l.`id` DESC LIMIT 50")->fetchAll(PDO::FETCH_ASSOC);
+  } catch (Exception $e) {}
+
+  try {
+    $sentToday = (int)$pdo->query("SELECT COALESCE(SUM(`sent`),0) FROM `warmup_log` WHERE `run_date`=CURDATE()")->fetchColumn();
+  } catch (Exception $e) {}
+
+  return array(
+    'plans'       => $plans,
+    'recipients'  => $recipients,
+    'logs'        => $logs,
+    'sent_today'  => $sentToday,
+    'sent_total'  => $sentTotal,
+    'fail_total'  => $failTotal,
+    'global_cap'  => defined('WARMUP_GLOBAL_DAILY_CAP') ? WARMUP_GLOBAL_DAILY_CAP : 30,
+    'max_per_run' => defined('WARMUP_MAX_PER_RUN') ? WARMUP_MAX_PER_RUN : 3,
+    'window'      => (defined('WARMUP_WINDOW_START_HOUR') ? WARMUP_WINDOW_START_HOUR : 8) . ':00 - '
+                   . (defined('WARMUP_WINDOW_END_HOUR') ? WARMUP_WINDOW_END_HOUR : 20) . ':00',
+  );
+}
+
 function overview_build($pdo, $redis, $ageCacheOnly = true) {
   // ---- 域名 + 出站中继 ----
   $domains = $pdo->query(
@@ -249,23 +413,13 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
     );
   }
 
-  // ---- 号池（Resend）----
-  $pool = null;
-  try {
-    $accs = $pdo->query(
-      "SELECT a.`id`, a.`label`, a.`active`, a.`check_status`, a.`daily_quota`,
-              (SELECT COUNT(*) FROM `resend_domains` d WHERE d.`account_id`=a.`id`) AS `domains`
-         FROM `resend_accounts` a ORDER BY a.`id` ASC"
-    )->fetchAll(PDO::FETCH_ASSOC);
-    $pool = array();
-    foreach ($accs as $a) {
-      $pool[] = array(
-        'id' => (int)$a['id'], 'label' => $a['label'], 'active' => (int)$a['active'],
-        'status' => $a['check_status'], 'quota' => (int)$a['daily_quota'],
-        'domains' => (int)$a['domains'],
-      );
-    }
-  } catch (Exception $e) { $pool = null; }
+  // ---- 中继号池（账号 / 域名绑定 / 容量额度）与 CF 状态 ----
+  $relay = null;
+  try { $relay = ov_relay_pool($pdo, $redis); } catch (Exception $e) { $relay = null; }
+
+  // ---- 养号（计划 / 收件人 / 日志）----
+  $warmup = null;
+  try { $warmup = ov_warmup_state($pdo); } catch (Exception $e) { $warmup = null; }
 
   // ---- 统计 ----
   $todaySent = 0;
@@ -284,7 +438,8 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
     'hostname'  => ov_host(),
     'domains'   => $out,
     'mailboxes' => $mbox,
-    'pool'      => $pool,
+    'relay'     => $relay,
+    'warmup'    => $warmup,
     'stats'     => array(
       'domains'   => count($out),
       'mailboxes' => count($mbox),

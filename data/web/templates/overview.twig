@@ -113,28 +113,183 @@
     </div>
   </div>
 
-  <!-- ========== 中继号池 ========== -->
-  <div class="card mb-3" id="ov_pool_card" style="display:none">
-    <div class="card-header d-flex align-items-center gap-2">
-      <span class="fs-5">中继号池（Resend）</span>
-      <span class="text-muted small">多个发信账号自动分配域名</span>
+  <!-- ========== 中继号池（Resend）+ Cloudflare ========== -->
+  <div class="card mb-3" id="ov_pool_card">
+    <div class="card-header d-flex flex-wrap align-items-center gap-2">
+      <span class="fs-5">中继号池（Resend）+ Cloudflare</span>
+      <span class="text-muted small">多账号负载均衡 · 域名绑定 · 容量与额度</span>
+      <div class="ms-auto d-flex gap-2">
+        <button class="btn btn-sm btn-secondary" id="ov_pool_sync">同步状态</button>
+        <button class="btn btn-sm btn-outline-secondary" id="ov_pool_reveal">显示/隐藏 Key</button>
+      </div>
     </div>
-    <div class="card-body p-0">
-      <div class="table-responsive">
-        <table class="table table-sm mb-0 align-middle">
+    <div class="card-body">
+
+      <!-- 汇总 -->
+      <div class="row g-2 mb-3">
+        <div class="col-6 col-lg-2"><div class="border rounded p-2">
+          <div class="text-muted small">启用账号</div><div class="fs-5" id="ov_pool_accounts">—</div></div></div>
+        <div class="col-6 col-lg-2"><div class="border rounded p-2">
+          <div class="text-muted small">已绑域名 / 总容量</div>
+          <div class="fs-5"><span id="ov_pool_used">—</span> / <span id="ov_pool_capacity">—</span></div></div></div>
+        <div class="col-6 col-lg-2"><div class="border rounded p-2">
+          <div class="text-muted small">剩余可绑</div><div class="fs-5" id="ov_pool_left">—</div></div></div>
+        <div class="col-6 col-lg-2"><div class="border rounded p-2">
+          <div class="text-muted small">日额度合计</div><div class="fs-5" id="ov_pool_quota">—</div></div></div>
+        <div class="col-6 col-lg-2"><div class="border rounded p-2">
+          <div class="text-muted small">单账号域上限</div><div class="fs-5" id="ov_pool_limit">—</div>
+            <div class="d-flex gap-1 mt-1">
+              <input type="number" class="form-control form-control-sm" id="ov_pool_limit_in" min="1" max="1000" style="width:5rem">
+              <button class="btn btn-sm btn-outline-primary" id="ov_pool_limit_set">改</button>
+            </div></div></div>
+        <div class="col-6 col-lg-2"><div class="border rounded p-2">
+          <div class="text-muted small">Cloudflare Token</div>
+          <div class="small" id="ov_cf_state">—</div>
+          <div class="d-flex gap-1 mt-1">
+            <input type="text" class="form-control form-control-sm" id="ov_cf_token" placeholder="cfat_…" style="width:100%">
+            <button class="btn btn-sm btn-outline-primary" id="ov_cf_save">存</button>
+          </div></div></div>
+      </div>
+
+      <!-- 账号表 -->
+      <div class="table-responsive mb-3">
+        <table class="table table-sm table-hover align-middle mb-0">
           <thead class="table-light">
-            <tr>
-              <th style="width:8%">ID</th>
-              <th style="width:26%">标签</th>
-              <th style="width:12%">状态</th>
-              <th style="width:14%">已绑域名</th>
-              <th style="width:14%">日配额</th>
-              <th style="width:26%">校验结果</th>
-            </tr>
+            <tr><th style="width:5%">ID</th><th style="width:16%">标签</th><th style="width:16%">API Key</th>
+                <th style="width:8%">状态</th><th style="width:11%">已绑/上限</th><th style="width:9%">日配额</th>
+                <th style="width:19%">最近校验</th><th style="width:16%">操作</th></tr>
           </thead>
           <tbody id="ov_pool_body"></tbody>
         </table>
       </div>
+
+      <!-- 新增账号 -->
+      <div class="row g-2 mb-4">
+        <div class="col-md-3"><input type="text" class="form-control form-control-sm" id="ov_acc_label"
+          placeholder="标签（如 Resend-账号2）"></div>
+        <div class="col-md-6"><input type="text" class="form-control form-control-sm" id="ov_acc_key"
+          placeholder="re_ 开头的 API Key（需 Full access 权限）"></div>
+        <div class="col-md-3 d-flex gap-2">
+          <button class="btn btn-sm btn-outline-secondary" id="ov_acc_check">先测 Key</button>
+          <button class="btn btn-sm btn-primary" id="ov_acc_add">添加账号</button>
+        </div>
+      </div>
+
+      <!-- 域名绑定 -->
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <span class="fs-6">域名绑定</span>
+        <span class="text-muted small">把域名绑到某个账号后，该域出站邮件即走该账号</span>
+        <div class="ms-auto d-flex gap-2">
+          <select class="form-select form-select-sm" id="ov_bind_domain" style="width:16rem"></select>
+          <select class="form-select form-select-sm" id="ov_bind_account" style="width:14rem"></select>
+          <button class="btn btn-sm btn-primary" id="ov_bind">绑定</button>
+          <button class="btn btn-sm btn-outline-primary" id="ov_auto_assign">一键自动分配</button>
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr><th style="width:26%">域名</th><th style="width:20%">所属账号</th><th style="width:14%">Resend 状态</th>
+                <th style="width:20%">验证通过时间</th><th style="width:20%">操作</th></tr>
+          </thead>
+          <tbody id="ov_bind_body"></tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ========== 养号（Warmup） ========== -->
+  <div class="card mb-3" id="ov_warmup_card">
+    <div class="card-header d-flex flex-wrap align-items-center gap-2">
+      <span class="fs-5">养号（Warmup）</span>
+      <span class="text-muted small" id="ov_wu_rule">—</span>
+      <div class="ms-auto d-flex gap-2">
+        <button class="btn btn-sm btn-secondary" id="ov_wu_refresh">刷新</button>
+        <button class="btn btn-sm btn-warning" id="ov_wu_run">立即执行一次</button>
+      </div>
+    </div>
+    <div class="card-body">
+
+      <div class="row g-2 mb-3">
+        <div class="col-6 col-lg-3"><div class="border rounded p-2">
+          <div class="text-muted small">今日已发 / 全局上限</div>
+          <div class="fs-5"><span id="ov_wu_today">—</span> / <span id="ov_wu_cap">—</span></div></div></div>
+        <div class="col-6 col-lg-3"><div class="border rounded p-2">
+          <div class="text-muted small">累计成功 / 失败</div>
+          <div class="fs-5"><span id="ov_wu_sent">—</span> / <span id="ov_wu_fail">—</span></div></div></div>
+        <div class="col-6 col-lg-3"><div class="border rounded p-2">
+          <div class="text-muted small">计划数</div><div class="fs-5" id="ov_wu_plans">—</div></div></div>
+        <div class="col-6 col-lg-3"><div class="border rounded p-2">
+          <div class="text-muted small">收件人池（启用/全部）</div><div class="fs-5" id="ov_wu_rc">—</div></div></div>
+      </div>
+
+      <!-- 计划表 -->
+      <div class="table-responsive mb-3">
+        <table class="table table-sm table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr><th style="width:20%">发件邮箱</th><th style="width:9%">进度</th><th style="width:11%">今日配额/已发</th>
+                <th style="width:9%">累计</th><th style="width:17%">状态</th><th style="width:14%">最后运行</th>
+                <th style="width:20%">操作</th></tr>
+          </thead>
+          <tbody id="ov_wu_plan_body"></tbody>
+        </table>
+      </div>
+
+      <!-- 新增计划：发件邮箱从邮箱列表中选择 -->
+      <div class="row g-2 mb-4 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label mb-0 small">发件邮箱（从邮箱账号中选择）</label>
+          <select class="form-select form-select-sm" id="ov_wu_sender"></select>
+        </div>
+        <div class="col-6 col-md-1"><label class="form-label mb-0 small">起量</label>
+          <input type="number" class="form-control form-control-sm" id="ov_wu_start" value="2" min="1" max="50"></div>
+        <div class="col-6 col-md-1"><label class="form-label mb-0 small">日增</label>
+          <input type="number" class="form-control form-control-sm" id="ov_wu_step" value="1" min="0" max="20"></div>
+        <div class="col-6 col-md-1"><label class="form-label mb-0 small">上限</label>
+          <input type="number" class="form-control form-control-sm" id="ov_wu_max" value="20" min="1" max="200"></div>
+        <div class="col-6 col-md-1"><label class="form-label mb-0 small">天数</label>
+          <input type="number" class="form-control form-control-sm" id="ov_wu_days" value="30" min="1" max="365"></div>
+        <div class="col-md-5">
+          <button class="btn btn-sm btn-primary" id="ov_wu_add_plan">添加养号计划</button>
+          <span class="text-muted small ms-2">每日配额 = 起量 + (第N天-1)×日增，封顶于上限</span>
+        </div>
+      </div>
+
+      <!-- 收件人池 -->
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <span class="fs-6">收件人池</span>
+        <span class="text-muted small">只会发往这里的地址；随机选一个真实收件人</span>
+        <div class="ms-auto d-flex gap-2">
+          <input type="text" class="form-control form-control-sm" id="ov_wu_rc_email" placeholder="someone@gmail.com" style="width:16rem">
+          <input type="text" class="form-control form-control-sm" id="ov_wu_rc_label" placeholder="备注" style="width:8rem">
+          <button class="btn btn-sm btn-primary" id="ov_wu_rc_add">添加收件人</button>
+        </div>
+      </div>
+      <div class="table-responsive mb-4">
+        <table class="table table-sm align-middle mb-0">
+          <thead class="table-light"><tr>
+            <th style="width:34%">收件地址</th><th style="width:22%">备注</th>
+            <th style="width:14%">状态</th><th style="width:30%">操作</th></tr></thead>
+          <tbody id="ov_wu_rc_body"></tbody>
+        </table>
+      </div>
+
+      <!-- 发送日志 -->
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <span class="fs-6">发送日志</span>
+        <span class="text-muted small">每封发给了谁、结果如何</span>
+      </div>
+      <div class="table-responsive" style="max-height:22rem;overflow:auto">
+        <table class="table table-sm table-hover align-middle mb-0">
+          <thead class="table-light" style="position:sticky;top:0"><tr>
+            <th style="width:17%">时间</th><th style="width:22%">发件邮箱</th>
+            <th style="width:9%">计划</th><th style="width:9%">实发</th><th style="width:9%">失败</th>
+            <th style="width:34%">详情（收件人 / 结果）</th></tr></thead>
+          <tbody id="ov_wu_log_body"></tbody>
+        </table>
+      </div>
+
     </div>
   </div>
 

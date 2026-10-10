@@ -30,6 +30,9 @@ $action = isset($_REQUEST['action']) ? (string)$_REQUEST['action'] : '';
 $write_actions = array(
   'add_domain', 'add_mailbox', 'reset_mailbox_password',
   'toggle_mailbox', 'check_domain', 'check_all',
+  // reveal_secret 本身不改数据，但它会把明文密钥下发到浏览器并写审计，
+  // 按「有副作用的动作」对待：拒绝 API 会话 + 强制 POST（防被动的 GET 触发）。
+  'reveal_secret',
 );
 
 // 写操作一律拒绝 API key 会话。
@@ -524,6 +527,44 @@ try {
         audit_log($pdo, 'mailbox.toggle', 'mailbox', $user, 'fail', $e->getMessage());
         ov_json(array('ok' => false, 'message' => 'toggle failed'));
       }
+    }
+
+    // ================= 读取明文密钥（必须 POST + 落审计） =================
+    case 'reveal_secret': {
+      // 管理员本就能在 mailcow 的中继页看到中继密码，所以「能看」不是新暴露；
+      // 但中继 Key 一旦泄露可以对外发信，因此要求显式点击 + 每次落审计，
+      // 让「谁、什么时候、看过哪把密钥」有据可查。
+      if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'POST') {
+        http_response_code(405);
+        ov_json(array('ok' => false, 'message' => 'reveal_secret 仅接受 POST'));
+      }
+      $kind = strtolower(ov_post('kind'));
+      $out = '';
+      $target = '';
+      if ($kind === 'resend') {
+        $id = (int)ov_post('id', '0');
+        if ($id <= 0) { ov_json(array('ok' => false, 'message' => '参数错误')); }
+        $st = $pdo->prepare("SELECT `api_key`,`label` FROM `resend_accounts` WHERE `id` = :i LIMIT 1");
+        $st->execute(array(':i' => $id));
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        $target = 'resend_account#' . $id;
+        if ($row) { $out = (string)$row['api_key']; $target .= ' ' . $row['label']; }
+      } elseif ($kind === 'cf') {
+        $st = $pdo->prepare("SELECT `svalue` FROM `resend_pool_settings` WHERE `skey` = 'cf_api_token' LIMIT 1");
+        $st->execute();
+        $out = (string)$st->fetchColumn();
+        $target = 'cloudflare_api_token';
+      } else {
+        ov_json(array('ok' => false, 'message' => 'unknown kind'));
+      }
+      if ($out === '') {
+        audit_log($pdo, 'secret.reveal', 'secret', $target, 'fail', 'not configured');
+        ov_json(array('ok' => false, 'message' => '未配置或不存在'));
+      }
+      // 审计只记「看过了」，**绝不记密钥内容**
+      audit_log($pdo, 'secret.reveal', 'secret', $target, 'ok',
+                'plaintext disclosed to admin (content not logged)');
+      ov_json(array('ok' => true, 'value' => $out));
     }
 
     default:
