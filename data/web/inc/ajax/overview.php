@@ -14,6 +14,7 @@
 
 require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/prerequisites.inc.php';
 require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.audit.inc.php';
+require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.overview.inc.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -153,127 +154,13 @@ function ov_run_check($pdo, $redis, $domain) {
 try {
   switch ($action) {
 
-    // ================= 总览（只读，纯 DB + 缓存） =================
+    // ================= 总览（只读，纯 DB + 缓存，不含 DNS 实时查询） =================
     case 'overview': {
       global $redis;
-
-      // 域名 + 中继
-      $domStmt = $pdo->query(
-        "SELECT d.`domain`, d.`active`, d.`relayhost`, r.`hostname` AS `relay_host`,
-                d.`backupmx`, d.`created`
-           FROM `domain` d
-           LEFT JOIN `relayhosts` r ON r.`id` = d.`relayhost`
-          ORDER BY d.`domain` ASC"
-      );
-      $domains = $domStmt->fetchAll(PDO::FETCH_ASSOC);
-
-      // 各域邮箱数
-      $cnt = array();
-      foreach ($pdo->query("SELECT `domain`, COUNT(*) AS `n` FROM `mailbox` GROUP BY `domain`")->fetchAll(PDO::FETCH_ASSOC) as $x) {
-        $cnt[$x['domain']] = (int)$x['n'];
-      }
-
-      // 养号计划（按域聚合）
-      $wu = array();
-      $hasWarmup = true;
-      try {
-        foreach ($pdo->query(
-          "SELECT p.`domain`,
-                  p.`status`, p.`started_on`, p.`start_count`, p.`step`, p.`max_count`, p.`total_days`,
-                  COALESCE((SELECT SUM(`sent`) FROM `warmup_log` WHERE `plan_id`=p.`id` AND `run_date`=CURDATE()),0) AS `sent_today`,
-                  COALESCE((SELECT SUM(`sent`) FROM `warmup_log` WHERE `plan_id`=p.`id`),0) AS `sent_all`,
-                  COALESCE((SELECT SUM(`failed`) FROM `warmup_log` WHERE `plan_id`=p.`id`),0) AS `fail_all`
-             FROM `warmup_plans` p"
-        )->fetchAll(PDO::FETCH_ASSOC) as $x) {
-          $day = 1;
-          if (!empty($x['started_on'])) {
-            $day = (int)floor((strtotime(date('Y-m-d')) - strtotime($x['started_on'])) / 86400) + 1;
-            if ($day < 1) $day = 1;
-          }
-          $quota = (int)$x['start_count'] + ($day - 1) * (int)$x['step'];
-          if ($quota > (int)$x['max_count']) $quota = (int)$x['max_count'];
-          $wu[$x['domain']] = array(
-            'status'     => $x['status'],
-            'day'        => $day,
-            'total_days' => (int)$x['total_days'],
-            'quota'      => $quota,
-            'sent_today' => (int)$x['sent_today'],
-            'sent_all'   => (int)$x['sent_all'],
-            'fail_all'   => (int)$x['fail_all'],
-          );
-        }
-      } catch (Exception $e) {
-        $hasWarmup = false;
-      }
-
-      $outDomains = array();
-      foreach ($domains as $d) {
-        $c = ov_cached_check($redis, $d['domain']);
-        $bad = 0; $warn = 0;
-        if ($c) {
-          if (!$c['mx_ok'])    $bad++;
-          if (!$c['spf_ok'])   $bad++;
-          if (!$c['dkim_ok'])  $bad++;
-          if (!$c['dmarc_ok']) $warn++;
-        }
-        $outDomains[] = array(
-          'domain'       => $d['domain'],
-          'active'       => (int)$d['active'],
-          'relay'        => ($d['relay_host'] === null ? '' : $d['relay_host']),
-          'mailboxes'    => isset($cnt[$d['domain']]) ? $cnt[$d['domain']] : 0,
-          'checked'      => $c !== null,
-          'checked_at'   => $c ? $c['checked_at'] : '',
-          'mx'           => $c ? $c['mx'] : array(),
-          'mx_ok'        => $c ? (bool)$c['mx_ok'] : null,
-          'spf_ok'       => $c ? (bool)$c['spf_ok'] : null,
-          'dkim_ok'      => $c ? (bool)$c['dkim_ok'] : null,
-          'dmarc_ok'     => $c ? (bool)$c['dmarc_ok'] : null,
-          'bad'          => $bad,
-          'warn'         => $warn,
-          'warmup'       => isset($wu[$d['domain']]) ? $wu[$d['domain']] : null,
-        );
-      }
-
-      // 邮箱清单
-      $mbox = array();
-      foreach ($pdo->query(
-        "SELECT m.`username`, m.`domain`, m.`name`, m.`active`, m.`quota`, m.`created`, m.`modified`
-           FROM `mailbox` m ORDER BY m.`domain` ASC, m.`username` ASC"
-      )->fetchAll(PDO::FETCH_ASSOC) as $m) {
-        $mbox[] = array(
-          'username' => $m['username'],
-          'domain'   => $m['domain'],
-          'name'     => $m['name'],
-          'active'   => (int)$m['active'],
-          'quota'    => (int)$m['quota'],
-          'created'  => $m['created'],
-        );
-      }
-
-      // 统计
-      $todaySent = 0;
-      try {
-        $todaySent = (int)$pdo->query("SELECT COALESCE(SUM(`sent`),0) FROM `warmup_log` WHERE `run_date`=CURDATE()")->fetchColumn();
-      } catch (Exception $e) {}
-
-      $abnormal = 0;
-      foreach ($outDomains as $x) { if ($x['bad'] > 0) $abnormal++; }
-
-      ov_json(array(
-        'ok'        => true,
-        'hostname'  => ov_hostname(),
-        'domains'   => $outDomains,
-        'mailboxes' => $mbox,
-        'stats'     => array(
-          'domains'      => count($outDomains),
-          'mailboxes'    => count($mbox),
-          'abnormal'     => $abnormal,
-          'today_sent'   => $todaySent,
-          'audit_count'  => audit_count($pdo),
-        ),
-        'audit'     => audit_recent($pdo, 30),
-        'server_time' => date('Y-m-d H:i:s'),
-      ));
+      $ov = overview_build($pdo, $redis, true);
+      $ov['audit'] = audit_recent($pdo, 30);
+      $ov['stats']['audit_count'] = audit_count($pdo);
+      ov_json($ov);
     }
 
     // ================= 体检单个域 =================
@@ -307,6 +194,8 @@ try {
       $n = 0; $bad = 0;
       foreach ($rows as $x) {
         try {
+          // 体检时顺便刷新域龄（写缓存 24h），之后页面首屏就能直接读缓存
+          ov_domain_age_days($redis, $x['domain'], false);
           $r = ov_run_check($pdo, $redis, $x['domain']);
           $n++;
           if (!$r['mx_ok'] || !$r['spf_ok'] || !$r['dkim_ok'] || !$r['dmarc_ok']) $bad++;
