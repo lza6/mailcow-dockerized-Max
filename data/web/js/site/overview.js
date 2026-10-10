@@ -19,8 +19,14 @@ $(document).ready(function () {
   function updateCsrf(d) {
     if (d && typeof d.csrf === 'string' && d.csrf) { window.__ov_csrf = d.csrf; }
   }
+  // esc() 既要用于文本位，也要用于属性位（如 data-domain="…"）。
+  // jQuery 的 .html() 只转义 & < >，**不转义引号**——属性位下值里出现 "
+  // 就能闭合属性并注入（带引号的 local part，如 "a"@x.com，能通过
+  // FILTER_VALIDATE_EMAIL）。所以这里额外转义两种引号：
+  // 文本位渲染 &quot; / &#39; 浏览器会还原成原字符，无副作用。
   function esc(s) {
-    return $('<div>').text(s === null || s === undefined ? '' : String(s)).html();
+    return $('<div>').text(s === null || s === undefined ? '' : String(s)).html()
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
   function post(data) {
     data.csrf_token = csrf();
@@ -261,12 +267,27 @@ $(document).ready(function () {
   });
 
   $('#ov_add_domain').on('click', function () {
-    post({ action: 'add_domain', domain: $('#ov_new_domain').val(), description: $('#ov_new_domain_desc').val() })
-      .done(function (d) {
-        if (d.ok) { notice('域名已添加'); $('#ov_new_domain,#ov_new_domain_desc').val(''); load(); }
-        else { notice(d.message || '添加失败', true); }
-      })
-      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); });
+    var dom = $('#ov_new_domain').val();
+    var mboxes = $('#ov_new_domain_mboxes').val();
+    var defq   = $('#ov_new_domain_defquota').val();
+    var dq     = $('#ov_new_domain_quota').val();
+    // 前端先做一次同样的约束检查，避免无意义往返
+    if (parseInt(defq, 10) > parseInt(dq, 10)) {
+      notice('单邮箱配额不能大于域总配额', true);
+      return;
+    }
+    post({
+      action: 'add_domain',
+      domain: dom,
+      description: $('#ov_new_domain_desc').val(),
+      mailboxes: mboxes,
+      defquota: defq,
+      maxquota: defq,
+      quota: dq
+    }).done(function (d) {
+      if (d.ok) { notice('域名已添加'); $('#ov_new_domain,#ov_new_domain_desc').val(''); load(); }
+      else { notice(d.message || '添加失败', true); }
+    }).fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); });
   });
 
   $('#ov_add_mbox').on('click', function () {

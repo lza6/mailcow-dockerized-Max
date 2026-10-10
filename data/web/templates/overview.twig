@@ -152,8 +152,25 @@
             <label class="form-label mb-0 small">备注（可选）</label>
             <input type="text" class="form-control form-control-sm" id="ov_new_domain_desc">
           </div>
+          <div class="row g-2 mb-2">
+            <div class="col-4">
+              <label class="form-label mb-0 small">关联邮箱数上限</label>
+              <input type="number" class="form-control form-control-sm" id="ov_new_domain_mboxes" value="10" min="0">
+            </div>
+            <div class="col-4">
+              <label class="form-label mb-0 small">单邮箱配额(MB)</label>
+              <input type="number" class="form-control form-control-sm" id="ov_new_domain_defquota" value="3072" min="1">
+            </div>
+            <div class="col-4">
+              <label class="form-label mb-0 small">域总配额(MB)</label>
+              <input type="number" class="form-control form-control-sm" id="ov_new_domain_quota" value="10240" min="1">
+            </div>
+          </div>
           <button class="btn btn-sm btn-primary" id="ov_add_domain">添加域名</button>
-          <div class="form-text">添加后自动生成 DKIM 密钥（2048bit），到「配置 → DKIM 密钥」复制 TXT 发布到 DNS。</div>
+          <div class="form-text">
+            添加后自动生成 DKIM 密钥（2048bit），到「配置 → DKIM 密钥」复制 TXT 发布到 DNS。
+            <br>配额需满足 <code>单邮箱 ≤ 域总配额</code>，默认值对齐已有域名。
+          </div>
         </div>
       </div>
     </div>

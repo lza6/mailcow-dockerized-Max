@@ -25,29 +25,25 @@ if (!isset($_SESSION['mailcow_cc_role']) || $_SESSION['mailcow_cc_role'] !== 'ad
   exit;
 }
 
-$is_api_session = isset($_SESSION['mailcow_cc_api']) && $_SESSION['mailcow_cc_api'] === true;
 $action = isset($_REQUEST['action']) ? (string)$_REQUEST['action'] : '';
 
 $write_actions = array(
   'add_domain', 'add_mailbox', 'reset_mailbox_password',
   'toggle_mailbox', 'check_domain', 'check_all',
 );
-$is_write = in_array($action, $write_actions, true);
 
-if ($is_api_session && $is_write) {
+// 写操作一律拒绝 API key 会话。
+//
+// 说明：mailcow 的 API key 分 ro / rw，但本页新增的这几个写动作在上游权限表里
+// 没有对应权限位，无法可靠区分调用方是 ro 还是 rw。与其猜测，不如全部拒绝：
+// 需要写操作请用浏览器会话——框架的 session_check() 会强制校验 CSRF。
+// （原先这里还跟了一段 `$is_write && $is_api_session` 的 CSRF 校验分支，
+//   但上面的拒绝已经 exit，该分支永远不可达，属于死代码，已删除。）
+if (isset($_SESSION['mailcow_cc_api']) && $_SESSION['mailcow_cc_api'] === true
+    && in_array($action, $write_actions, true)) {
   http_response_code(403);
-  echo json_encode(array('ok' => false, 'message' => 'read-only API key cannot perform write operations'), JSON_UNESCAPED_UNICODE);
+  echo json_encode(array('ok' => false, 'message' => 'API key sessions cannot perform write operations on this endpoint'), JSON_UNESCAPED_UNICODE);
   exit;
-}
-
-// 写操作需要 CSRF（仅 API 会话路径；浏览器会话由框架 session_check 校验）
-if ($is_write && $is_api_session) {
-  $sess_token = isset($_SESSION['CSRF']['TOKEN']) ? $_SESSION['CSRF']['TOKEN'] : '';
-  if (!isset($_POST['csrf_token']) || !hash_equals($sess_token, (string)$_POST['csrf_token'])) {
-    http_response_code(403);
-    echo json_encode(array('ok' => false, 'message' => 'CSRF token invalid'), JSON_UNESCAPED_UNICODE);
-    exit;
-  }
 }
 
 function ov_json($data) {
@@ -60,6 +56,33 @@ function ov_json($data) {
 }
 
 function ov_post($k, $d = '') { return isset($_POST[$k]) ? trim((string)$_POST[$k]) : $d; }
+
+/**
+ * 判定 mailbox() 的调用结果。
+ *
+ * mailcow 的 mailbox() 失败时**不抛异常**，而是 return false 并把原因写进
+ * $_SESSION['return'][].msg（源码里约 50 处如此）。调用方若不检查返回值，
+ * 就会把"没做成"当成"做成了"——既误导管理员，也会往审计里写假记录。
+ *
+ * @return array array($ok, $msg)
+ */
+function ov_mailbox_result($result) {
+  $msgs = array();
+  if (isset($_SESSION['return']) && is_array($_SESSION['return'])) {
+    foreach ($_SESSION['return'] as $r) {
+      if (isset($r['msg']) && $r['msg'] !== '') { $msgs[] = (string)$r['msg']; }
+    }
+    // 取完即清，避免污染后续判定
+    unset($_SESSION['return']);
+  }
+  if ($result === false) {
+    return array(false, $msgs ? implode('; ', array_unique($msgs)) : 'mailbox() 返回 false');
+  }
+  if (is_array($result) && isset($result['error']) && $result['error'] !== '') {
+    return array(false, (string)$result['error']);
+  }
+  return array(true, '');
+}
 
 function ov_valid_domain($d) {
   if ($d === '' || strlen($d) > 253) return false;
@@ -115,7 +138,20 @@ function ov_run_check($pdo, $redis, $domain) {
     }
   }
   $r['spf'] = $spf;
-  $r['spf_ok'] = $spf !== null && !preg_match('/include:\S*serv00/i', $spf);
+  // SPF 判定标准（原实现只去找一个已下线的 `include:...serv00...`，
+  // serv00 回收后该特征在所有域上都不存在，于是「没有 SPF 的域」也会被判 ok）。
+  // 现改为三条硬标准：
+  //   1) 存在 v=spf1 记录
+  //   2) 授权了本机（mx / a:本机主机名 / include:本机主机名）
+  //   3) 以 all 机制收尾（~/-/+/ ? 任一）
+  $r['spf_ok'] = false;
+  if ($spf !== null) {
+    $spf_l = strtolower($spf);
+    $covers_us = (bool)preg_match('/(?:^|\s)mx(?:\s|:|$)/', $spf_l)
+              || ($host !== '' && strpos($spf_l, ':' . $host) !== false);
+    $has_all = (bool)preg_match('/[~\-+?]all(?:\s|$)/', $spf_l);
+    $r['spf_ok'] = $covers_us && $has_all;
+  }
 
   // DKIM（从 redis 取 selector）
   $sel = null;
@@ -127,8 +163,18 @@ function ov_run_check($pdo, $redis, $domain) {
     $res = @dns_get_record($name, DNS_TXT);
     if (is_array($res)) {
       foreach ($res as $x) {
+        // 长 TXT 会被 DNS 拆成多段（255 字节一段）。dns_get_record 在部分平台
+        // 给出 entries 数组而非拼好的 txt，不拼回去会让 p= 的值被截断。
         $t = isset($x['txt']) ? $x['txt'] : '';
-        if (stripos($t, 'v=DKIM1') !== false || stripos($t, 'p=') !== false) { $r['dkim_ok'] = true; break; }
+        if (isset($x['entries']) && is_array($x['entries'])) { $t = implode('', $x['entries']); }
+        if (stripos($t, 'v=DKIM1') === false) { continue; }
+        // 关键：撤销后的公钥是 "v=DKIM1; p="（p 为空）。只要出现 p= 就算通过的话，
+        // 已撤销的 key 会被判成「已发布」——必须取出 p 的值并确认非空。
+        if (preg_match('/\bp\s*=\s*([A-Za-z0-9+\/\s=]+)/i', str_replace('"', '', $t), $m)
+            && trim($m[1]) !== '') {
+          $r['dkim_ok'] = true;
+          break;
+        }
       }
     }
   }
@@ -175,7 +221,7 @@ try {
         $r = ov_run_check($pdo, $redis, $d);
         $errs = array();
         if (!$r['mx_ok'])    $errs[] = 'MX 未指向本机';
-        if (!$r['spf_ok'])   $errs[] = 'SPF 缺失或含可疑 include';
+        if (!$r['spf_ok'])   $errs[] = 'SPF 缺失、未授权本机或缺少 all 机制';
         if (!$r['dkim_ok'])  $errs[] = 'DKIM 公钥未发布';
         if (!$r['dmarc_ok']) $errs[] = 'DMARC 缺失';
         audit_log($pdo, 'domain.check', 'domain', $d, empty($errs) ? 'ok' : 'fail',
@@ -190,8 +236,16 @@ try {
     // ================= 体检全部 =================
     case 'check_all': {
       global $redis;
+      // 本动作**不接收任何参数**，因此必须显式要求 POST：
+      // mailcow 的框架只在 $_POST 非空时才校验 CSRF（sessions.inc.php:157），
+      // 若允许纯 GET 触发，第三方页面用 <img src="...?action=check_all"> 就能
+      // 让已登录管理员被动执行全量体检（每域 RDAP + 多次 DNS，可耗尽 php-fpm worker）。
+      if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'POST') {
+        http_response_code(405);
+        ov_json(array('ok' => false, 'message' => 'check_all 仅接受 POST'));
+      }
       $rows = $pdo->query("SELECT `domain` FROM `domain` WHERE `active`='1' ORDER BY `domain` ASC")->fetchAll(PDO::FETCH_ASSOC);
-      $n = 0; $bad = 0;
+      $n = 0; $bad = 0; $errs = array();
       foreach ($rows as $x) {
         try {
           // 体检时顺便刷新域龄（写缓存 24h），之后页面首屏就能直接读缓存
@@ -199,10 +253,22 @@ try {
           $r = ov_run_check($pdo, $redis, $x['domain']);
           $n++;
           if (!$r['mx_ok'] || !$r['spf_ok'] || !$r['dkim_ok'] || !$r['dmarc_ok']) $bad++;
-        } catch (Exception $e) {}
+        } catch (Exception $e) {
+          // 不静默吞掉：逐域记录原因，避免"一个都没跑成"却被报成 ok
+          $errs[] = $x['domain'] . ': ' . $e->getMessage();
+        }
       }
-      audit_log($pdo, 'domain.check_all', 'domain', '', 'ok', "checked=$n abnormal=$bad");
-      ov_json(array('ok' => true, 'checked' => $n, 'abnormal' => $bad));
+      $total = count($rows);
+      if ($n === 0 && $total > 0) {
+        $msg = '全部域名体检失败：' . implode('; ', array_slice($errs, 0, 3));
+        audit_log($pdo, 'domain.check_all', 'domain', '', 'fail', mb_substr($msg, 0, 250));
+        ov_json(array('ok' => false, 'message' => $msg, 'checked' => 0, 'total' => $total));
+      }
+      audit_log($pdo, 'domain.check_all', 'domain', '', empty($errs) ? 'ok' : 'fail',
+                'checked=' . $n . '/' . $total . ' abnormal=' . $bad
+                . ($errs ? ('; errors=' . count($errs)) : ''));
+      ov_json(array('ok' => true, 'checked' => $n, 'total' => $total,
+                    'abnormal' => $bad, 'errors' => $errs));
     }
 
     // ================= 新增域名 =================
@@ -219,15 +285,32 @@ try {
         ov_json(array('ok' => false, 'message' => '域名已存在'));
       }
       try {
-        // 走 mailcow 自己的 domain 添加逻辑，避免绕开其副作用（DKIM、别名域等）
+        // mailcow 的 mailbox('add','domain') 有一串硬校验，必须同时满足：
+        //   defquota > 0、maxquota > 0、defquota <= maxquota、maxquota <= quota
+        // 任一条不满足就 return false（如 defquota_empty / mailbox_quota_exceeds_domain_quota）。
+        // 而 mailbox() 失败不抛异常、只 return false，所以这里既要有合理默认值，
+        // 也必须检查返回值，否则会出现「接口报成功、库里没数据、审计记假 ok」。
+        // 默认值对齐本项目已有域的实际配置（见 domain 表）。
+        $aliases  = (int)ov_post('aliases', '400');
+        $mboxes   = (int)ov_post('mailboxes', '10');
+        $defquota = (int)ov_post('defquota', '3072');     // 单邮箱默认配额 MB
+        $maxquota = (int)ov_post('maxquota', '10240');    // 单邮箱最大配额 MB
+        $dquota   = (int)ov_post('quota', '10240');       // 域总配额 MB
+
+        if ($defquota <= 0) { $defquota = 3072; }
+        if ($maxquota <= 0) { $maxquota = 10240; }
+        if ($maxquota < $defquota) { $maxquota = $defquota; }
+        // 域总配额必须 >= 单邮箱最大配额，否则 mailcow 直接拒绝
+        if ($dquota < $maxquota) { $dquota = $maxquota; }
+
         $result = mailbox('add', 'domain', array(
           'domain'           => $d,
           'description'      => ov_post('description'),
-          'aliases'          => 0,
-          'mailboxes'        => (int)ov_post('mailboxes', '0'),
-          'defquota'         => (int)ov_post('defquota', '0'),
-          'maxquota'         => (int)ov_post('maxquota', '0'),
-          'quota'            => (int)ov_post('quota', '0'),
+          'aliases'          => $aliases,
+          'mailboxes'        => $mboxes,
+          'defquota'         => $defquota,
+          'maxquota'         => $maxquota,
+          'quota'            => $dquota,
           'active'           => 1,
           'gal'              => 0,
           'backupmx'         => 0,
@@ -235,8 +318,16 @@ try {
           'relay_unknown_only'   => 0,
           'dkim_selector'    => 'dkim',
           'key_size'         => 2048,
+          'template'         => 0,
+          'restart_sogo'     => 0,
         ));
-        audit_log($pdo, 'domain.add', 'domain', $d, 'ok', 'created');
+        list($ok, $msg) = ov_mailbox_result($result);
+        if (!$ok) {
+          audit_log($pdo, 'domain.add', 'domain', $d, 'fail', $msg);
+          ov_json(array('ok' => false, 'message' => '添加失败：' . $msg));
+        }
+        audit_log($pdo, 'domain.add', 'domain', $d, 'ok',
+                  'created; defquota=' . $defquota . ' maxquota=' . $maxquota);
         ov_json(array('ok' => true, 'result' => $result));
       } catch (Exception $e) {
         audit_log($pdo, 'domain.add', 'domain', $d, 'fail', $e->getMessage());
@@ -280,6 +371,11 @@ try {
           'tls_enforce_in'  => 0,
           'tls_enforce_out' => 0,
         ));
+        list($ok, $msg) = ov_mailbox_result($result);
+        if (!$ok) {
+          audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'fail', $msg);
+          ov_json(array('ok' => false, 'message' => '添加失败：' . $msg));
+        }
         // 审计里绝不记录密码
         audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'ok', 'created; quota=' . (int)ov_post('quota', '0'));
         ov_json(array('ok' => true, 'result' => $result));
@@ -317,12 +413,18 @@ try {
         ov_json(array('ok' => false, 'message' => '邮箱不存在'));
       }
       try {
-        mailbox('edit', 'mailbox', array(
+        // 注意：**不要**在这里传 active=1 —— 那会把已停用的邮箱静默重新启用，
+        // 而按钮的语义只是「重置密码」。是否启用应由管理员显式决定。
+        $result = mailbox('edit', 'mailbox', array(
           'username' => $user,
           'password' => $pw,
           'password2'=> $pw,
-          'active'   => 1,
         ));
+        list($ok, $msg) = ov_mailbox_result($result);
+        if (!$ok) {
+          audit_log($pdo, 'mailbox.reset_pw', 'mailbox', $user, 'fail', $msg);
+          ov_json(array('ok' => false, 'message' => '重置失败：' . $msg));
+        }
         // 审计只记"改了"，绝不记密码本身
         audit_log($pdo, 'mailbox.reset_pw', 'mailbox', $user, 'ok',
                   $generated ? 'generated random password' : 'set to provided password');
@@ -351,7 +453,12 @@ try {
       }
       $new = ((int)$cur === 1) ? 0 : 1;
       try {
-        mailbox('edit', 'mailbox', array('username' => $user, 'active' => $new));
+        $result = mailbox('edit', 'mailbox', array('username' => $user, 'active' => $new));
+        list($ok, $msg) = ov_mailbox_result($result);
+        if (!$ok) {
+          audit_log($pdo, 'mailbox.toggle', 'mailbox', $user, 'fail', $msg);
+          ov_json(array('ok' => false, 'message' => '操作失败：' . $msg));
+        }
         audit_log($pdo, 'mailbox.toggle', 'mailbox', $user, 'ok', 'active=' . $new);
         ov_json(array('ok' => true, 'active' => $new));
       } catch (Exception $e) {

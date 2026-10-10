@@ -77,3 +77,6 @@ update_diffs/
 create_cold_standby.sh
 !data/conf/nginx/mailcow_auth.conf
 data/conf/postfix/postfix-tlspol
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
