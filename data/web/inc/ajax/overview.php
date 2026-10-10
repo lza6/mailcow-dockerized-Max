@@ -49,6 +49,42 @@ if (isset($_SESSION['mailcow_cc_api']) && $_SESSION['mailcow_cc_api'] === true
   exit;
 }
 
+/*
+ * 写动作显式要求「本次请求确实通过了框架的 CSRF 校验」。
+ *
+ * sessions.inc.php 的真实行为（读源码确认，不是推测）：
+ *   校验**通过** → unset($_POST['csrf_token'])（其余字段保留）
+ *                 且 $_SESSION['CSRF']['TOKEN'] = 新随机值（轮换）
+ *   校验**失败** → return false，随后调用方执行 $_POST = array()（整个清空）
+ *
+ * 所以判据只能用「框架留下了什么」，**不能用 token 值比对**：
+ *   会话里的 token 在校验通过的那一刻已经被换成新值，此刻再拿客户端提交的旧值
+ *   去比一定不相等 —— 第一版就是这么写的，实测把**所有合法写请求**都 403 掉了。
+ *
+ * 两道判据：
+ *   ① 客户端确实提交过 token（在 $_REQUEST 里找 —— 成功时 $_POST 里的已被 unset）
+ *   ② $_POST 没有被清空 —— 说明框架放行了
+ *
+ * 为什么需要这道检查（2026-10-11 生产实测）：
+ *   「CSRF 失败 → 清空参数 → 动作自然失效」只对**带参**动作成立。
+ *   check_all 不读任何参数，修复前用伪造 token 打过去会照常执行：
+ *     实测 → HTTP 200 {"ok":true,"checked":16}，审计新增一条 domain.check_all。
+ */
+if (in_array($action, $write_actions, true)) {
+  if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'POST') {
+    http_response_code(405);
+    ov_json(array('ok' => false, 'message' => '该动作仅接受 POST'));
+  }
+  if (!isset($_REQUEST['csrf_token']) || (string)$_REQUEST['csrf_token'] === '') {
+    http_response_code(403);
+    ov_json(array('ok' => false, 'message' => '缺少 CSRF token，请刷新页面后重试'));
+  }
+  if (empty($_POST)) {
+    http_response_code(403);
+    ov_json(array('ok' => false, 'message' => 'CSRF 校验失败，请刷新页面后重试'));
+  }
+}
+
 function ov_json($data) {
   // mailcow 每次 POST 通过校验后会轮换 CSRF token，必须回传否则前端第二次写必 403
   if (!isset($data['csrf']) && isset($_SESSION['CSRF']['TOKEN'])) {
@@ -139,8 +175,25 @@ function ov_write($pdo, $lock_key, $fn) {
   }
 }
 
-function ov_valid_domain($d) {
-  if ($d === '' || strlen($d) > 253) return false;
+/**
+ * 统一的「未预期异常」出口。
+ *
+ * 为什么不把 $e->getMessage() 直接回给浏览器 / 写进审计：
+ *   PDOException 的消息里含 SQL 片段、表名与列名；它既会经响应回显，
+ *   也会经 admin_audit_log.detail 再渲染回页面上（审计页就是本页）。
+ *   完整信息只进 error_log，浏览器与审计里只留追踪码，需要时按码去容器日志查。
+ */
+function ov_fatal($pdo, $action, $target, $e) {
+  $trace = bin2hex(random_bytes(4));
+  $type  = get_class($e);
+  error_log('overview.php [' . $action . '][' . $trace . '] ' . $type . ': ' . $e->getMessage());
+  try {
+    audit_log($pdo, $action, 'error', $target, 'fail', $type . ' trace=' . $trace);
+  } catch (Exception $x) {}
+  ov_json(array('ok' => false, 'message' => '内部错误，请稍后重试（追踪码 ' . $trace . '）'));
+}
+
+function ov_valid_domain($d) {  if ($d === '' || strlen($d) > 253) return false;
   if (preg_match('/[\r\n\t,;@\s]/', $d)) return false;
   return (bool)preg_match('/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i', $d);
 }
@@ -153,15 +206,6 @@ function ov_valid_email($e) {
 /** 本机主机名（用于判断 MX 是否指向我们自己） */
 function ov_hostname() {
   return strtolower(trim((string)getenv('MAILCOW_HOSTNAME')));
-}
-
-/** 缓存的域检查结果（由 check_domain 写入） */
-function ov_cached_check($redis, $domain) {
-  if (!$redis) return null;
-  $raw = $redis->get('OV_CHECK/' . $domain);
-  if ($raw === false || $raw === null) return null;
-  $d = json_decode($raw, true);
-  return is_array($d) ? $d : null;
 }
 
 /**
@@ -283,21 +327,30 @@ try {
                   empty($errs) ? 'all pass' : implode('; ', $errs));
         ov_json(array('ok' => true, 'result' => $r));
       } catch (Exception $e) {
-        audit_log($pdo, 'domain.check', 'domain', $d, 'fail', $e->getMessage());
-        ov_json(array('ok' => false, 'message' => 'check failed'));
+        ov_fatal($pdo, 'domain.check', $d, $e);
       }
     }
 
     // ================= 体检全部 =================
     case 'check_all': {
       global $redis;
-      // 本动作**不接收任何参数**，因此必须显式要求 POST：
-      // mailcow 的框架只在 $_POST 非空时才校验 CSRF（sessions.inc.php:157），
-      // 若允许纯 GET 触发，第三方页面用 <img src="...?action=check_all"> 就能
-      // 让已登录管理员被动执行全量体检（每域 RDAP + 多次 DNS，可耗尽 php-fpm worker）。
-      if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'POST') {
-        http_response_code(405);
-        ov_json(array('ok' => false, 'message' => 'check_all 仅接受 POST'));
+      // POST 与 CSRF 已在入口统一校验，这里只做「开销冷却」。
+      //
+      // check_all 会对全部活跃域做**实时** DNS（每域 4 次）并刷新 RDAP
+      // （单域 curl 超时 12s），是本站点最重的动作。没有冷却时重复点击
+      // （或同站点伪造请求）可以反复触发，把 php-fpm worker 占满。
+      // 用一个 20 秒的 redis 锁把重复触发折叠掉。
+      if ($redis) {
+        try {
+          if (!$redis->setnx('OV_CHECKALL_LOCK', '1')) {
+            $ttl = (int)$redis->ttl('OV_CHECKALL_LOCK');
+            ov_json(array('ok' => false,
+                          'message' => '体检刚刚执行过，请 ' . max(1, $ttl) . ' 秒后再试'));
+          }
+          $redis->expire('OV_CHECKALL_LOCK', 20);
+        } catch (Exception $e) {
+          // redis 异常不阻断体检本身
+        }
       }
       $rows = $pdo->query("SELECT `domain` FROM `domain` WHERE `active`='1' ORDER BY `domain` ASC")->fetchAll(PDO::FETCH_ASSOC);
       $n = 0; $bad = 0; $errs = array();
@@ -387,18 +440,18 @@ try {
                   'created; defquota=' . $defquota . ' maxquota=' . $maxquota);
         ov_json(array('ok' => true, 'result' => true));
       } catch (Exception $e) {
-        audit_log($pdo, 'domain.add', 'domain', $d, 'fail', $e->getMessage());
-        ov_json(array('ok' => false, 'message' => 'add failed: ' . $e->getMessage()));
+        ov_fatal($pdo, 'domain.add', $d, $e);
       } catch (Error $e) {
-        audit_log($pdo, 'domain.add', 'domain', $d, 'fail', $e->getMessage());
-        ov_json(array('ok' => false, 'message' => 'add failed: ' . $e->getMessage()));
+        ov_fatal($pdo, 'domain.add', $d, $e);
       }
     }
 
     // ================= 新增邮箱 =================
     case 'add_mailbox': {
       $user = strtolower(ov_post('username'));
-      $pw   = (string)ov_post('password');
+      // 密码**不做 trim**：ov_post() 会 trim，而 " Abc12345 " 这种带首尾空格的密码
+      // 会被静默改写，管理员按自己记录的值登录会失败，且界面与审计都看不出差异。
+      $pw   = isset($_POST['password']) ? (string)$_POST['password'] : '';
       if (!ov_valid_email($user)) {
         audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'fail', 'invalid address');
         ov_json(array('ok' => false, 'message' => '邮箱地址不合法'));
@@ -440,18 +493,16 @@ try {
         audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'ok', 'created; quota=' . $quota);
         ov_json(array('ok' => true, 'result' => true));
       } catch (Exception $e) {
-        audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'fail', $e->getMessage());
-        ov_json(array('ok' => false, 'message' => 'add failed'));
+        ov_fatal($pdo, 'mailbox.add', $user, $e);
       } catch (Error $e) {
-        audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'fail', $e->getMessage());
-        ov_json(array('ok' => false, 'message' => 'add failed'));
+        ov_fatal($pdo, 'mailbox.add', $user, $e);
       }
     }
 
     // ================= 重置邮箱密码 =================
     case 'reset_mailbox_password': {
       $user = strtolower(ov_post('username'));
-      $pw   = (string)ov_post('password');
+      $pw   = isset($_POST['password']) ? (string)$_POST['password'] : '';   // 同上：密码不 trim
       if (!ov_valid_email($user)) {
         audit_log($pdo, 'mailbox.reset_pw', 'mailbox', $user, 'fail', 'invalid address');
         ov_json(array('ok' => false, 'message' => '邮箱地址不合法'));
@@ -491,11 +542,9 @@ try {
                   $generated ? 'generated random password' : 'set to provided password');
         ov_json(array('ok' => true, 'generated' => $generated, 'password' => $pw));
       } catch (Exception $e) {
-        audit_log($pdo, 'mailbox.reset_pw', 'mailbox', $user, 'fail', $e->getMessage());
-        ov_json(array('ok' => false, 'message' => 'reset failed'));
+        ov_fatal($pdo, 'mailbox.reset_pw', $user, $e);
       } catch (Error $e) {
-        audit_log($pdo, 'mailbox.reset_pw', 'mailbox', $user, 'fail', $e->getMessage());
-        ov_json(array('ok' => false, 'message' => 'reset failed'));
+        ov_fatal($pdo, 'mailbox.reset_pw', $user, $e);
       }
     }
 
@@ -503,6 +552,9 @@ try {
     case 'toggle_mailbox': {
       $user = strtolower(ov_post('username'));
       if (!ov_valid_email($user)) {
+        // 与其他写动作保持一致：非法参数同样留痕，否则「反复提交非法地址」
+        // 在这套审计里是完全隐形的
+        audit_log($pdo, 'mailbox.toggle', 'mailbox', $user, 'fail', 'invalid address');
         ov_json(array('ok' => false, 'message' => '邮箱地址不合法'));
       }
       $st = $pdo->prepare("SELECT `active` FROM `mailbox` WHERE `username` = :u");
@@ -524,8 +576,7 @@ try {
         audit_log($pdo, 'mailbox.toggle', 'mailbox', $user, 'ok', 'active=' . $new);
         ov_json(array('ok' => true, 'active' => $new));
       } catch (Exception $e) {
-        audit_log($pdo, 'mailbox.toggle', 'mailbox', $user, 'fail', $e->getMessage());
-        ov_json(array('ok' => false, 'message' => 'toggle failed'));
+        ov_fatal($pdo, 'mailbox.toggle', $user, $e);
       }
     }
 
@@ -534,10 +585,7 @@ try {
       // 管理员本就能在 mailcow 的中继页看到中继密码，所以「能看」不是新暴露；
       // 但中继 Key 一旦泄露可以对外发信，因此要求显式点击 + 每次落审计，
       // 让「谁、什么时候、看过哪把密钥」有据可查。
-      if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'POST') {
-        http_response_code(405);
-        ov_json(array('ok' => false, 'message' => 'reveal_secret 仅接受 POST'));
-      }
+      // POST 与 CSRF 已在入口统一校验。
       $kind = strtolower(ov_post('kind'));
       $out = '';
       $target = '';

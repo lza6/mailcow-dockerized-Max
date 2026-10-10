@@ -29,7 +29,6 @@ $ov['stats']['audit_count'] = audit_count($pdo);
 
 $template = 'overview.twig';
 $template_data = [
-  'lang_admin'    => json_encode($lang['admin']),
   // 用 JSON_HEX_TAG 等把 < > & ' " 全部转义，避免提前闭合 <script>
   'ov_initial'    => json_encode($ov, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
                                    | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT),

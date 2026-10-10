@@ -205,6 +205,12 @@ services:
         ofelia.job-exec.phpfpm_warmup.schedule: "0 */5 * * * *"
         ofelia.job-exec.phpfpm_warmup.no-overlap: "true"
         ofelia.job-exec.phpfpm_warmup.command: "/bin/bash -c \"php /crons/warmup.php || exit 0\""
+        # 每天 04:30 清理自建表的过期数据（audit 180 天 / warmup_log 365 天 /
+        # overview_mbox_daily 90 天）。这三张表只增不减且都参与总览查询，
+        # 不清理会让页面随时间变慢。
+        ofelia.job-exec.phpfpm_retention.schedule: "0 30 4 * * *"
+        ofelia.job-exec.phpfpm_retention.no-overlap: "true"
+        ofelia.job-exec.phpfpm_retention.command: "/bin/bash -c \"php /crons/retention.php || exit 0\""
       networks:
         mailcow-network:
           aliases:

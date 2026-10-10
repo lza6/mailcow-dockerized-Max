@@ -242,11 +242,33 @@ function dt_load_bridge_entries($lines) {
   if (!is_readable($file)) {
     return array(array(), 'cf-bridge 日志文件不可读（' . $file . '）：请确认桥容器已挂载日志目录并设置了 LOG_FILE');
   }
-  $raw = @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-  if ($raw === false) {
+  $lines = max(1, (int)$lines);
+
+  // 只从文件**尾部**读，不把整个文件读进内存。
+  // 原实现用 file() 整读再 array_slice —— 注释写着「避免大文件拖慢」，
+  // 但内存早在读取那一刻就吃满了：5MB ≈ 35k 行 ≈ 10–15MB PHP 数组，
+  // 并发读时成倍放大，而实际只用到最后 $lines 行。
+  $fh = @fopen($file, 'rb');
+  if ($fh === false) {
+    return array(array(), 'cf-bridge 日志打开失败');
+  }
+  $size = (int)@filesize($file);
+  // 按每行约 400 字节估算需要回退多少，留足余量；至少回退 4KB
+  $back  = max(4096, $lines * 400);
+  $start = max(0, $size - $back);
+  if ($start > 0) { fseek($fh, $start); }
+  $buf = stream_get_contents($fh);
+  fclose($fh);
+  if ($buf === false) {
     return array(array(), 'cf-bridge 日志读取失败');
   }
-  // 只看末尾 $lines 行，避免大文件拖慢
+  // 从中间切入时第一行可能是残行，丢弃
+  if ($start > 0) {
+    $nl = strpos($buf, "\n");
+    if ($nl !== false) { $buf = substr($buf, $nl + 1); }
+  }
+  $raw = preg_split('/\r\n|\n|\r/', $buf);
+  $raw = array_values(array_filter($raw, function ($l) { return trim((string)$l) !== ''; }));
   if (count($raw) > $lines) {
     $raw = array_slice($raw, -$lines);
   }

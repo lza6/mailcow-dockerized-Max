@@ -58,19 +58,48 @@ log = logging.getLogger("cf-bridge")
 # 给 Web 应用 docker socket 等于给它主机 root 权限），dockerapi 也没有 logs 路由，
 # 因此 Web 侧无法用 docker logs 读本容器日志。改为让桥主动写文件、php-fpm 只读挂载。
 LOG_FILE = os.environ.get("LOG_FILE", "").strip()
+LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+class _SizedRotatingFileHandler(logging.FileHandler):
+    """按大小轮转的文件 handler（在**每次写入前**判断，不是启动时判一次）。
+
+    为什么必须放进写入路径：本进程是 `asyncio.run(main())` 常驻守护进程。
+    原先的大小检查写在模块顶层（import 阶段），整个进程生命周期只执行一次 ——
+    启动之后文件就**没有任何上界**了。而 Web 侧的投递追踪用 `file()` 整读该文件，
+    文件多大就吃多少内存（5MB ≈ 35k 行 ≈ 10-15MB PHP 数组，并发读时成倍放大）。
+    """
+
+    def __init__(self, filename: str, max_bytes: int) -> None:
+        super().__init__(filename, encoding="utf-8")
+        self.max_bytes = max_bytes
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self.stream is not None and self.stream.tell() >= self.max_bytes:
+                self._rollover()
+        except (OSError, ValueError):
+            pass
+        super().emit(record)
+
+    def _rollover(self) -> None:
+        bak = self.baseFilename + ".1"
+        if self.stream is not None:
+            self.stream.close()
+            self.stream = None
+        try:
+            if os.path.exists(bak):
+                os.remove(bak)
+            os.rename(self.baseFilename, bak)
+        except OSError:
+            pass
+        self.stream = self._open()
+
+
 if LOG_FILE:
     try:
         os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        # 简易按大小轮转：超过 5MB 就滚动一次，避免无限增长
-        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 5 * 1024 * 1024:
-            bak = LOG_FILE + ".1"
-            try:
-                if os.path.exists(bak):
-                    os.remove(bak)
-                os.rename(LOG_FILE, bak)
-            except OSError:
-                pass
-        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        fh = _SizedRotatingFileHandler(LOG_FILE, LOG_MAX_BYTES)
         fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         log.addHandler(fh)
     except OSError as e:

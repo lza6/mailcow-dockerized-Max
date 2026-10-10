@@ -261,7 +261,11 @@ function init_db_schema()
           ),
           "key" => array(
             "plan_id" => array("plan_id"),
-            "run_date" => array("run_date")
+            "run_date" => array("run_date"),
+            // 实际查询是 WHERE plan_id=? AND run_date=CURDATE()（overview 与 warmup 都用到）。
+            // 只有单列索引时，走 plan_id 后还要回表过滤 run_date，扫的是该计划的**全部历史**
+            // （每天 1 行 → 一年 365 行）。这是这批查询里唯一随运行时间线性增长的一条。
+            "plan_run" => array("plan_id", "run_date")
           )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
@@ -304,6 +308,24 @@ function init_db_schema()
             "action" => array("action"),
             "target" => array("target"),
             "created" => array("created")
+          )
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "overview_mbox_daily" => array(
+        "cols" => array(
+          "username" => "VARCHAR(255) NOT NULL",
+          "day" => "DATE NOT NULL",
+          "base_messages" => "BIGINT NOT NULL DEFAULT '0'"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("username", "day")
+          ),
+          // 实际查询是 WHERE day = :today；主键 (username, day) 用不上这个前缀，
+          // 缺这条索引就是聚簇索引全扫（每邮箱每天 +1 行，且只增不减）。
+          "key" => array(
+            "day" => array("day")
           )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"

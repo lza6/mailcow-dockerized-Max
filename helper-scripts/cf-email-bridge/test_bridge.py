@@ -277,8 +277,6 @@ def _run_all():
     return 1 if failed else 0
 
 
-if __name__ == "__main__":
-    sys.exit(_run_all())
 def test_relay_logs_message_id():
     """回归：relay() 必须在日志里带上 Message-ID。
 
@@ -330,4 +328,72 @@ def test_relay_logs_message_id():
 def test_email_module_is_imported():
     """回归：email 模块必须导入（relay 用它解析 Message-ID）。"""
     assert hasattr(bridge, "email"), "bridge 必须 import email"
+
+
+# ---------------- 日志轮转必须在写入路径上判断 ----------------
+
+def _write_through(handler, name: str, n: int, prefix: str) -> None:
+    import logging
+    lg = logging.getLogger(name)
+    lg.handlers = [handler]
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    for i in range(n):
+        lg.info("%s-%03d-%s", prefix, i, "x" * 40)
+
+
+def test_log_rotation_happens_during_run_not_only_at_startup():
+    """回归：轮转判断原先写在模块顶层（import 期只执行一次）。
+
+    本进程是 asyncio 常驻守护进程，等于启动后再也不轮转 —— 文件无上界，
+    而 Web 侧投递追踪会整读该文件。现在轮转在 emit() 里，运行中持续生效。
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "run.log")
+        h = bridge._SizedRotatingFileHandler(p, 512)
+        h.setFormatter(__import__("logging").Formatter("%(message)s"))
+        _write_through(h, "rot-run", 200, "run")
+        h.close()
+
+        assert os.path.exists(p + ".1"), "写入量远超阈值后必须产生 .1 备份"
+        assert os.path.getsize(p) < 4096, "轮转后主文件必须被重置，而不是继续追加"
+        assert os.path.getsize(p + ".1") >= 512, "备份文件应当含有被滚出的内容"
+
+
+def test_log_rotation_backup_is_replaced_each_time():
+    """轮转只保留一代 .1（旧备份被覆盖），不会无限堆文件。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "rep.log")
+        h = bridge._SizedRotatingFileHandler(p, 256)
+        h.setFormatter(__import__("logging").Formatter("%(message)s"))
+        _write_through(h, "rot-rep", 1000, "rep")
+        h.close()
+        assert os.path.exists(p + ".1")
+        # 只应有一代备份
+        assert not os.path.exists(p + ".2"), "不应存在第二代备份"
+        assert os.path.getsize(p + ".1") < 8192, "备份文件不应累积增长"
+
+
+def test_handler_requires_max_bytes():
+    """max_bytes 是必填参数，防止有人退回"启动时判一次"的写法。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "z.log")
+        try:
+            bridge._SizedRotatingFileHandler(p)   # type: ignore[call-arg]
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("缺少 max_bytes 时应报 TypeError")
+
+
+# 入口必须放在文件**最后**。
+# 曾经它被放在文件中部：Python 自上而下执行，`sys.exit(_run_all())` 会在
+# 后面的测试函数还没被定义时就退出 —— 于是排在它后面的回归测试
+# （test_relay_logs_message_id / test_email_module_is_imported）以及之后新增的测试
+# **在 `python3 test_bridge.py` 下从未真正执行过**，却一直显示"全部通过"。
+if __name__ == "__main__":
+    sys.exit(_run_all())
 
