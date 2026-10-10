@@ -84,6 +84,58 @@ function ov_mailbox_result($result) {
   return array(true, '');
 }
 
+/**
+ * 串行化「针对同一目标对象」的写操作，并对死锁自动重试。
+ *
+ * 背景（2026-10-11 生产压测实测，不是推测）：
+ *   8 个管理员会话并发对**同一个邮箱**做 toggle 时，MariaDB 报
+ *     SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying
+ *     to get lock; try restarting transaction
+ *   100 次写入里出现 1 次失败 —— 管理员点了按钮却报错。
+ *
+ * 根因：mailcow 的 mailbox('edit','mailbox') 内部会连续更新 mailbox / alias /
+ * quota2 / sogo 视图等多张表，并发下锁顺序交错，必然死锁；这是上游行为，
+ * 我们无法在不侵入 mailcow 核心的前提下改它的锁顺序。
+ *
+ * 两道防线：
+ *   1) GET_LOCK 按目标串行 —— 同一目标的写排队，从根上消除这类死锁；
+ *   2) 死锁重试 —— 不同目标之间仍可能间接死锁，识别到就退避重试。
+ *
+ * @param PDO      $pdo      数据库句柄
+ * @param string   $lock_key 目标标识（如邮箱地址）；相同 key 之间互斥
+ * @param callable $fn       真正执行写入的闭包，返回 mailbox() 的返回值
+ * @return array array($ok, $msg)
+ */
+function ov_write($pdo, $lock_key, $fn) {
+  $lock  = 'mailcow_ov_' . md5((string)$lock_key);
+  $got   = false;
+  $tries = 4;
+  try {
+    $got = (bool)$pdo->query("SELECT GET_LOCK(" . $pdo->quote($lock) . ", 5)")->fetchColumn();
+  } catch (Exception $e) {
+    // 拿不到锁也继续：重试逻辑仍然能兜住死锁，不能因为锁服务异常就拒绝写入
+    $got = false;
+  }
+  $last = '未知错误';
+  try {
+    for ($try = 0; $try < $tries; $try++) {
+      list($ok, $msg) = ov_mailbox_result($fn());
+      if ($ok) { return array(true, ''); }
+      $last = $msg;
+      // 只有死锁/锁等待超时才重试；参数错误、配额冲突等重试无意义
+      if (!preg_match('/deadlock|serialization failure|lock wait timeout|\b(1213|1205)\b/i', $msg)) {
+        return array(false, $msg);
+      }
+      usleep(100000 * ($try + 1));   // 100 / 200 / 300 ms 退避
+    }
+    return array(false, $last . '（已重试 ' . $tries . ' 次）');
+  } finally {
+    if ($got) {
+      try { $pdo->query("SELECT RELEASE_LOCK(" . $pdo->quote($lock) . ")")->fetchColumn(); } catch (Exception $e) {}
+    }
+  }
+}
+
 function ov_valid_domain($d) {
   if ($d === '' || strlen($d) > 253) return false;
   if (preg_match('/[\r\n\t,;@\s]/', $d)) return false;
@@ -303,32 +355,34 @@ try {
         // 域总配额必须 >= 单邮箱最大配额，否则 mailcow 直接拒绝
         if ($dquota < $maxquota) { $dquota = $maxquota; }
 
-        $result = mailbox('add', 'domain', array(
-          'domain'           => $d,
-          'description'      => ov_post('description'),
-          'aliases'          => $aliases,
-          'mailboxes'        => $mboxes,
-          'defquota'         => $defquota,
-          'maxquota'         => $maxquota,
-          'quota'            => $dquota,
-          'active'           => 1,
-          'gal'              => 0,
-          'backupmx'         => 0,
-          'relay_all_recipients' => 0,
-          'relay_unknown_only'   => 0,
-          'dkim_selector'    => 'dkim',
-          'key_size'         => 2048,
-          'template'         => 0,
-          'restart_sogo'     => 0,
-        ));
-        list($ok, $msg) = ov_mailbox_result($result);
+        $desc = ov_post('description');
+        list($ok, $msg) = ov_write($pdo, 'domain:' . $d, function () use ($d, $desc, $aliases, $mboxes, $defquota, $maxquota, $dquota) {
+          return mailbox('add', 'domain', array(
+            'domain'           => $d,
+            'description'      => $desc,
+            'aliases'          => $aliases,
+            'mailboxes'        => $mboxes,
+            'defquota'         => $defquota,
+            'maxquota'         => $maxquota,
+            'quota'            => $dquota,
+            'active'           => 1,
+            'gal'              => 0,
+            'backupmx'         => 0,
+            'relay_all_recipients' => 0,
+            'relay_unknown_only'   => 0,
+            'dkim_selector'    => 'dkim',
+            'key_size'         => 2048,
+            'template'         => 0,
+            'restart_sogo'     => 0,
+          ));
+        });
         if (!$ok) {
           audit_log($pdo, 'domain.add', 'domain', $d, 'fail', $msg);
           ov_json(array('ok' => false, 'message' => '添加失败：' . $msg));
         }
         audit_log($pdo, 'domain.add', 'domain', $d, 'ok',
                   'created; defquota=' . $defquota . ' maxquota=' . $maxquota);
-        ov_json(array('ok' => true, 'result' => $result));
+        ov_json(array('ok' => true, 'result' => true));
       } catch (Exception $e) {
         audit_log($pdo, 'domain.add', 'domain', $d, 'fail', $e->getMessage());
         ov_json(array('ok' => false, 'message' => 'add failed: ' . $e->getMessage()));
@@ -359,26 +413,29 @@ try {
         ov_json(array('ok' => false, 'message' => '密码至少 8 位'));
       }
       try {
-        $result = mailbox('add', 'mailbox', array(
-          'local_part'      => $parts[0],
-          'domain'          => $dom,
-          'name'            => ov_post('name'),
-          'quota'           => (int)ov_post('quota', '0'),
-          'password'        => $pw,
-          'password2'       => $pw,
-          'active'          => 1,
-          'force_pw_update' => 0,
-          'tls_enforce_in'  => 0,
-          'tls_enforce_out' => 0,
-        ));
-        list($ok, $msg) = ov_mailbox_result($result);
+        $name  = ov_post('name');
+        $quota = (int)ov_post('quota', '0');
+        list($ok, $msg) = ov_write($pdo, 'mailbox:' . $user, function () use ($parts, $dom, $name, $quota, $pw) {
+          return mailbox('add', 'mailbox', array(
+            'local_part'      => $parts[0],
+            'domain'          => $dom,
+            'name'            => $name,
+            'quota'           => $quota,
+            'password'        => $pw,
+            'password2'       => $pw,
+            'active'          => 1,
+            'force_pw_update' => 0,
+            'tls_enforce_in'  => 0,
+            'tls_enforce_out' => 0,
+          ));
+        });
         if (!$ok) {
           audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'fail', $msg);
           ov_json(array('ok' => false, 'message' => '添加失败：' . $msg));
         }
         // 审计里绝不记录密码
-        audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'ok', 'created; quota=' . (int)ov_post('quota', '0'));
-        ov_json(array('ok' => true, 'result' => $result));
+        audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'ok', 'created; quota=' . $quota);
+        ov_json(array('ok' => true, 'result' => true));
       } catch (Exception $e) {
         audit_log($pdo, 'mailbox.add', 'mailbox', $user, 'fail', $e->getMessage());
         ov_json(array('ok' => false, 'message' => 'add failed'));
@@ -415,12 +472,13 @@ try {
       try {
         // 注意：**不要**在这里传 active=1 —— 那会把已停用的邮箱静默重新启用，
         // 而按钮的语义只是「重置密码」。是否启用应由管理员显式决定。
-        $result = mailbox('edit', 'mailbox', array(
-          'username' => $user,
-          'password' => $pw,
-          'password2'=> $pw,
-        ));
-        list($ok, $msg) = ov_mailbox_result($result);
+        list($ok, $msg) = ov_write($pdo, 'mailbox:' . $user, function () use ($user, $pw) {
+          return mailbox('edit', 'mailbox', array(
+            'username' => $user,
+            'password' => $pw,
+            'password2'=> $pw,
+          ));
+        });
         if (!$ok) {
           audit_log($pdo, 'mailbox.reset_pw', 'mailbox', $user, 'fail', $msg);
           ov_json(array('ok' => false, 'message' => '重置失败：' . $msg));
@@ -453,8 +511,9 @@ try {
       }
       $new = ((int)$cur === 1) ? 0 : 1;
       try {
-        $result = mailbox('edit', 'mailbox', array('username' => $user, 'active' => $new));
-        list($ok, $msg) = ov_mailbox_result($result);
+        list($ok, $msg) = ov_write($pdo, 'mailbox:' . $user, function () use ($user, $new) {
+          return mailbox('edit', 'mailbox', array('username' => $user, 'active' => $new));
+        });
         if (!$ok) {
           audit_log($pdo, 'mailbox.toggle', 'mailbox', $user, 'fail', $msg);
           ov_json(array('ok' => false, 'message' => '操作失败：' . $msg));
