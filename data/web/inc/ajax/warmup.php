@@ -6,9 +6,14 @@
  */
 
 require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/prerequisites.inc.php';
+require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.audit.inc.php';
 require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.warmup.inc.php';
 require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.secretbox.inc.php';
 require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.warmup_ext.inc.php';
+// 复用总览页的养号数据构造器：**两个端点必须返回同一组字段**——
+// 先前这里是手写的，少给了 sent_total/fail_total/messages/等，
+// 导致「首屏有数据、点刷新就变空/变 undefined」这类只在刷新时暴露的问题。
+require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.overview.inc.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -65,19 +70,13 @@ if ($is_write) {
 
 if ($is_api_session && $is_write) {
   http_response_code(403);
-  echo json_encode(array('ok' => false, 'message' => 'read-only API key cannot perform write operations'), JSON_UNESCAPED_UNICODE);
+  echo json_encode(array('ok' => false, 'message' => 'API key sessions cannot perform write operations on this endpoint'), JSON_UNESCAPED_UNICODE);
   exit;
 }
 
-// 写操作需要 CSRF（仅 API 会话路径，浏览器会话由框架 session_check() 校验）
-if ($is_write && $is_api_session) {
-  $sess_token = $_SESSION['CSRF']['TOKEN'] ?? '';
-  if (!isset($_POST['csrf_token']) || !hash_equals($sess_token, (string)$_POST['csrf_token'])) {
-    http_response_code(403);
-    echo json_encode(array('ok' => false, 'message' => 'CSRF token invalid'), JSON_UNESCAPED_UNICODE);
-    exit;
-  }
-}
+// （原先这里还有一段「$is_write && $is_api_session 时比对 CSRF token」的分支，
+//   但上面已经对该组合直接 403 退出，那段永远不可达 —— 属于死代码，已删除。
+//   留着会误导读者以为「API 会话可以凭 token 写」。）
 
 function wu_json($data) {
   // mailcow 的 session_check()（sessions.inc.php:166）在每次 POST 通过校验后
@@ -130,116 +129,14 @@ try {
 
     // ============ 概览 ============
     case 'overview': {
-      $plans = warmup_plans($pdo);
-      $recipients = warmup_recipients($pdo);
-      $logs = warmup_logs($pdo, 50);
-
-      $out = array();
-      foreach ($plans as $p) {
-        $next = warmup_next_send($p);
-        $out[] = array(
-          'id'           => (int)$p['id'],
-          'domain'       => $p['domain'],
-          'sender'       => $p['sender'],
-          'status'       => $p['status'],
-          'pause_reason' => $p['pause_reason'],
-          'start_count'  => (int)$p['start_count'],
-          'step'         => (int)$p['step'],
-          'max_count'    => (int)$p['max_count'],
-          'total_days'   => (int)$p['total_days'],
-          'started_on'   => $p['started_on'],
-          'day_index'    => warmup_day_index($p),
-          'day_quota'    => warmup_daily_quota($p),
-          'sent_today'   => (int)$p['sent_today'],
-          'sent_all'     => (int)$p['sent_all'],
-          'fail_all'     => (int)$p['fail_all'],
-          'last_run'     => $p['last_run'],
-          // 「下一封什么时候发」——与调度器同一套算法算出来，不是另算一遍
-          'next_at'      => $next['at'],
-          'next_state'   => $next['state'],
-          // 必须与 ov_warmup_state() 返回**同字段** —— 否则点「刷新」后这项会丢
-          'skip_reason'  => (string)$p['last_skip_reason'],
-        );
-      }
-
-      $rcOut = array();
-      foreach ($recipients as $r) {
-        // 只给「是否已配置密码」，**绝不把 secret_enc 吐出去**
-        $rcOut[] = array(
-          'id'            => (int)$r['id'],
-          'email'         => $r['email'],
-          'label'         => $r['label'],
-          'active'        => (int)$r['active'],
-          'imap_host'     => (string)$r['imap_host'],
-          'imap_port'     => (int)$r['imap_port'],
-          'smtp_host'     => (string)$r['smtp_host'],
-          'smtp_port'     => (int)$r['smtp_port'],
-          'has_secret'    => !empty($r['secret_enc']),
-          'verify_status' => (string)$r['verify_status'],
-          'last_verify'   => (string)$r['last_verify'],
-          'last_check'    => (string)$r['last_check'],
-          'inbox_count'   => (int)$r['inbox_count'],
-          'spam_count'    => (int)$r['spam_count'],
-          'reply_count'   => (int)$r['reply_count'],
-          'auto_reply'    => (int)$r['auto_reply'],
-          'rescue_spam'   => (int)$r['rescue_spam'],
-        );
-      }
-
-      $logOut = array();
-      foreach ($logs as $l) {
-        $logOut[] = array(
-          'id'       => (int)$l['id'],
-          'plan_id'  => (int)$l['plan_id'],
-          'domain'   => $l['domain'],
-          'sender'   => $l['sender'],
-          'run_at'   => $l['run_at'],
-          'run_date' => $l['run_date'],
-          'planned'  => (int)$l['planned'],
-          'sent'     => (int)$l['sent'],
-          'failed'   => (int)$l['failed'],
-          'detail'   => $l['detail'],
-        );
-      }
-
-      // 逐封明细（发给谁 / Message-ID / 真实落点 / 是否已回复）。
-      // **必须和 ov_warmup_state() 返回同一组字段** —— 否则点「刷新」后
-      // 逐封明细表会被 d.messages 为 undefined 清空，首屏有数据、刷新就没了。
-      $msgOut = array();
-      try {
-        $rows = $pdo->query("SELECT m.`id`, m.`plan_id`, m.`recipient`, m.`message_id`,
-                                    m.`subject`, m.`sent_at`, m.`send_ok`, m.`fail_reason`,
-                                    m.`result`, m.`checked_at`, m.`replied_at`, p.`sender`
-                               FROM `warmup_messages` m
-                               LEFT JOIN `warmup_plans` p ON p.`id` = m.`plan_id`
-                              ORDER BY m.`id` DESC LIMIT 50")->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($rows as $x) {
-          $msgOut[] = array(
-            'id' => (int)$x['id'], 'plan_id' => (int)$x['plan_id'],
-            'recipient' => (string)$x['recipient'], 'message_id' => (string)$x['message_id'],
-            'subject' => (string)$x['subject'], 'sent_at' => (string)$x['sent_at'],
-            'send_ok' => (int)$x['send_ok'], 'fail_reason' => (string)$x['fail_reason'],
-            'result' => (string)$x['result'], 'checked_at' => (string)$x['checked_at'],
-            'replied_at' => (string)$x['replied_at'], 'sender' => (string)$x['sender'],
-          );
-        }
-      } catch (Exception $e) { error_log('warmup: 读取逐封明细失败: ' . $e->getMessage()); }
-
-      wu_json(array(
-        'ok'             => true,
-        'plans'          => $out,
-        'recipients'     => $rcOut,
-        'logs'           => $logOut,
-        'messages'       => $msgOut,
-        'sent_today'     => warmup_sent_today_total($pdo),
-        'global_cap'     => WARMUP_GLOBAL_DAILY_CAP,
-        'max_per_run'    => WARMUP_MAX_PER_RUN,
-        'window'         => WARMUP_WINDOW_START_HOUR . ':00 - ' . WARMUP_WINDOW_END_HOUR . ':00',
-        'server_time'    => date('Y-m-d H:i:s'),
-        // 真实进箱/垃圾箱统计（来自收件人邮箱的实际核对，不是估算）
-        'stats'          => warmup_delivery_stats($pdo, 30),
-        'secretbox'      => sb_available(),
-      ));
+      // 单一构造器：字段集与总览页首屏**完全一致**，不再各写一份。
+      $w = ov_warmup_state($pdo);
+      $w['ok']          = true;
+      $w['global_cap']  = WARMUP_GLOBAL_DAILY_CAP;
+      $w['max_per_run'] = WARMUP_MAX_PER_RUN;
+      $w['reply_daily_cap'] = WARMUP_REPLY_DAILY_CAP;
+      $w['server_time'] = date('Y-m-d H:i:s');
+      wu_json($w);
     }
 
     // ============ 计划 ============
@@ -291,7 +188,10 @@ try {
         ':d' => $domain, ':s' => $sender,
         ':sc' => $start, ':st' => $step, ':mx' => $max, ':td' => $days,
       ));
-      wu_json(array('ok' => true, 'id' => (int)$pdo->lastInsertId()));
+      $newId = (int)$pdo->lastInsertId();
+      audit_log($pdo, 'warmup.plan_add', 'warmup_plan', (string)$newId, 'ok',
+                $sender . ' / 起量' . $start . ' 日增' . $step . ' 上限' . $max . ' 天数' . $days);
+      wu_json(array('ok' => true, 'id' => $newId));
     }
 
     case 'edit_plan': {
@@ -309,6 +209,7 @@ try {
                                     `max_count` = :mx, `total_days` = :td
                               WHERE `id` = :id");
       $stmt->execute(array(':sc' => $start, ':st' => $step, ':mx' => $max, ':td' => $days, ':id' => $id));
+      audit_log($pdo, 'warmup.plan_edit', 'warmup_plan', (string)$id, 'ok', '起量'.$start.' 日增'.$step.' 上限'.$max.' 天数'.$days);
       wu_json(array('ok' => true));
     }
 
@@ -322,6 +223,7 @@ try {
                                 SET `status` = :s, `pause_reason` = ''
                               WHERE `id` = :id");
       $stmt->execute(array(':s' => $status, ':id' => $id));
+      audit_log($pdo, 'warmup.plan_status', 'warmup_plan', (string)$id, 'ok', 'status='.$status);
       wu_json(array('ok' => true));
     }
 
@@ -331,6 +233,7 @@ try {
         wu_json(array('ok' => false, 'message' => 'invalid id'));
       }
       $stmt = $pdo->prepare("DELETE FROM `warmup_plans` WHERE `id` = :id");
+      audit_log($pdo, 'warmup.plan_delete', 'warmup_plan', (string)$id, 'ok', 'deleted');
       $stmt->execute(array(':id' => $id));
       wu_json(array('ok' => true));
     }
@@ -402,6 +305,9 @@ try {
               ->execute(array(':s' => mb_substr($verify['message'], 0, 255), ':i' => $id));
         }
       }
+      audit_log($pdo, 'warmup.rcpt_add', 'warmup_recipient', $email, 'ok',
+                'id=' . $id . ' 凭据=' . ($enc === '' ? '无' : '已加密')
+                . ' 自动回复=' . (wu_int('auto_reply') ? 1 : 0) . ' 救援=' . (wu_int('rescue_spam') ? 1 : 0));
       wu_json(array('ok' => true, 'id' => $id, 'verify' => $verify));
     }
 
@@ -424,6 +330,7 @@ try {
       $msg = 'IMAP 验证通过，可见 ' . $n . ' 个文件夹' . ($spam !== '' ? ('；垃圾箱=' . $spam) : '；未找到垃圾箱文件夹');
       $pdo->prepare("UPDATE `warmup_recipients` SET `verify_status` = :s, `last_verify` = NOW(0)
                       WHERE `id` = :i")->execute(array(':s' => mb_substr($msg, 0, 255), ':i' => $id));
+      audit_log($pdo, 'warmup.rcpt_verify', 'warmup_recipient', (string)$cred['email'], 'ok', mb_substr($msg, 0, 200));
       wu_json(array('ok' => true, 'message' => $msg, 'spam_folder' => $spam));
     }
 
@@ -436,7 +343,13 @@ try {
       if (isset($_POST['auto_reply']))   { $sets[] = '`auto_reply` = :ar';   $args[':ar'] = wu_int('auto_reply') ? 1 : 0; }
       if (isset($_POST['rescue_spam']))  { $sets[] = '`rescue_spam` = :rs';  $args[':rs'] = wu_int('rescue_spam') ? 1 : 0; }
       if (isset($_POST['active']))       { $sets[] = '`active` = :a';        $args[':a'] = wu_int('active') ? 1 : 0; }
-      if (isset($_POST['secret']) && (string)$_POST['secret'] !== '') {
+      // 支持显式清空：传 secret=__clear__ 表示删除已存密码（否则只能覆盖，
+      // 误配的账号就只能删掉重建，连带产生孤儿消息）
+      if (isset($_POST['secret']) && (string)$_POST['secret'] === '__clear__') {
+        $sets[] = '`secret_enc` = NULL';
+        $sets[] = '`verify_status` = :vs'; $args[':vs'] = '已清空凭据';
+      }
+      if (isset($_POST['secret']) && (string)$_POST['secret'] !== '' && (string)$_POST['secret'] !== '__clear__') {
         if (!sb_available()) { wu_json(array('ok' => false, 'message' => '凭据保管箱不可用')); }
         $enc = sb_encrypt((string)$_POST['secret']);
         if ($enc === '') { wu_json(array('ok' => false, 'message' => '凭据加密失败')); }
@@ -445,6 +358,8 @@ try {
       if (empty($sets)) { wu_json(array('ok' => false, 'message' => '没有要修改的内容')); }
       $pdo->prepare("UPDATE `warmup_recipients` SET " . implode(', ', $sets) . " WHERE `id` = :i")
           ->execute($args);
+      audit_log($pdo, 'warmup.rcpt_edit', 'warmup_recipient', '#' . $id, 'ok',
+                'fields=' . implode('|', $sets));
       wu_json(array('ok' => true));
     }
 
@@ -484,18 +399,22 @@ try {
           $skipped[] = $sender . '（' . mb_substr($e->getMessage(), 0, 80) . '）';
         }
       }
+      audit_log($pdo, 'warmup.plan_add_all', 'warmup_plan', '*', 'ok',
+                'created=' . $created . ' skipped=' . count($skipped));
       wu_json(array('ok' => true, 'created' => $created, 'skipped' => $skipped));
     }
 
     // ============ 手动触发：投递判定（去收件人邮箱看进了收件箱还是垃圾箱）============
     case 'check_deliveries': {
       $r = warmup_check_deliveries($pdo, 30);
+      audit_log($pdo, 'warmup.check_deliveries', 'warmup', '*', 'ok', 'checked='.$r['checked'].' inbox='.$r['inbox'].' spam='.$r['spam']);
       wu_json(array('ok' => true, 'result' => $r));
     }
 
     // ============ 手动触发：互动（垃圾箱救援 + 自动回复）============
     case 'run_interact': {
       $r = warmup_interact($pdo, 10);
+      audit_log($pdo, 'warmup.interact', 'warmup', '*', 'ok', 'rescued='.$r['rescued'].' replied='.$r['replied']);
       wu_json(array('ok' => true, 'result' => $r));
     }
 
@@ -504,7 +423,15 @@ try {
       if ($id <= 0) {
         wu_json(array('ok' => false, 'message' => 'invalid id'));
       }
+      // 先把该收件人的未判定消息置终态，再删账号。
+      // 否则它们按 recipient_id 悬空：每轮判定仍会捞出、取不到凭据就跳过，
+      // 既白连一次 IMAP，又把「账号已删除」误报成「未配置应用专用密码」。
+      $pdo->prepare("UPDATE `warmup_messages`
+                        SET `result` = 'recipient_removed', `checked_at` = NOW(0)
+                      WHERE `recipient_id` = :i AND `result` = 'unknown'")
+          ->execute(array(':i' => $id));
       $stmt = $pdo->prepare("DELETE FROM `warmup_recipients` WHERE `id` = :id");
+      audit_log($pdo, 'warmup.rcpt_delete', 'warmup_recipient', '#'.$id, 'ok', 'deleted');
       $stmt->execute(array(':id' => $id));
       wu_json(array('ok' => true));
     }
@@ -515,6 +442,7 @@ try {
         wu_json(array('ok' => false, 'message' => 'invalid id'));
       }
       $stmt = $pdo->prepare("UPDATE `warmup_recipients` SET `active` = 1 - `active` WHERE `id` = :id");
+      audit_log($pdo, 'warmup.rcpt_toggle', 'warmup_recipient', '#'.$id, 'ok', 'toggled');
       $stmt->execute(array(':id' => $id));
       wu_json(array('ok' => true));
     }
@@ -522,6 +450,9 @@ try {
     // ============ 立即执行一轮（人工触发，忽略随机时刻） ============
     case 'run_now': {
       $r = warmup_run($pdo, true);
+      // 「立即执行一次」跳过随机时刻，是影响面最大的动作，必须留痕
+      audit_log($pdo, 'warmup.run_now', 'warmup', '*', 'ok',
+                'sent=' . $r['sent'] . ' failed=' . $r['failed']);
       wu_json(array('ok' => true, 'result' => $r));
     }
 

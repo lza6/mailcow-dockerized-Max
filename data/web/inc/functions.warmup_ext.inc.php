@@ -21,18 +21,34 @@ if (!defined('WWE_SMTP_TIMEOUT')) { define('WWE_SMTP_TIMEOUT', 20); }
 
 /**
  * 主机名校验：只允许普通主机名/IPv4，杜绝把 `}`, `{`, `/` 等 IMAP 串分隔符带进去。
+ *
+ * 另外**拒绝内网地址**：收件人主机是管理员填的，若允许任意 host:port，
+ * 就等于让 php-fpm 变成内网端口探测器（它会拿着已保存的密码去连目标）。
+ * 正常场景只可能是公网邮件服务商（Gmail/Outlook/自建域）。
  */
 function wwe_valid_host($h) {
   $h = strtolower(trim((string)$h));
   if ($h === '' || strlen($h) > 253) { return ''; }
   if (!preg_match('/^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/', $h)) { return ''; }
   if (strpos($h, '..') !== false) { return ''; }
+
+  // 内网 / 回环 / 链路本地 / 容器网段 —— 一律拒绝
+  if (preg_match('/^(localhost|.*\.local|.*\.internal|.*\.localhost)$/', $h)) { return ''; }
+  if (filter_var($h, FILTER_VALIDATE_IP)) {
+    if (!filter_var($h, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+      return '';
+    }
+  }
+  // 主机名恰好是裸网段名（无点）也拒掉，如 `mysql`、`redis`
+  if (strpos($h, '.') === false) { return ''; }
   return $h;
 }
 
+/** 端口白名单：只允许标准 IMAP/SMTP 端口，避免被拿去探测内网任意端口 */
 function wwe_valid_port($p, $default) {
   $p = (int)$p;
-  return ($p >= 1 && $p <= 65535) ? $p : $default;
+  static $allow = array(143, 993, 587, 465, 25, 2525);
+  return in_array($p, $allow, true) ? $p : (int)$default;
 }
 
 /**
@@ -336,14 +352,61 @@ function wwe_send_reply($rcpt, $to, $subject, $body, $inReplyTo = '') {
 }
 
 /**
- * 扫描收件箱里来自指定发件人的邮件（用于识别"对方回复了我们"）。
- * @return int 条数
+ * 检查收件人是否**主动回过信**：在它自己的「已发送」里找发给某个我们方发件人的邮件。
+ *
+ * 为什么看 Sent 而不是 INBOX：我们要确认的是"对方回了我们"，
+ * 那封信在对方的 Sent 里、在我们的发件箱里。
+ *
+ * @param string $sentFolder 「已发送」文件夹的完整名（由 wwe_sent_folder 找到）
+ * @return array array($ok, $count, $latestAt)
  */
-function wwe_count_from($conn, $fromEmail, $sinceDays = 14) {
-  if (!filter_var($fromEmail, FILTER_VALIDATE_EMAIL)) { return 0; }
-  if (!@imap_reopen($conn, 'INBOX')) { return 0; }
+function wwe_check_peer_reply($conn, $sentFolder, $toEmail, $sinceDays = 30) {
+  if ($sentFolder === '' || !filter_var($toEmail, FILTER_VALIDATE_EMAIL)) {
+    return array(false, 0, '');
+  }
+  if (!@imap_reopen($conn, $sentFolder)) { return array(false, 0, ''); }
   $since = date('d-M-Y', time() - max(1, (int)$sinceDays) * 86400);
-  $crit  = 'FROM "' . addcslashes($fromEmail, '"\\') . '" SINCE "' . $since . '"';
-  $uids  = @imap_search($conn, $crit, SE_UID);
-  return is_array($uids) ? count($uids) : 0;
+  $uids = @imap_search($conn, 'TO "' . addcslashes($toEmail, '"\\') . '" SINCE "' . $since . '"', SE_UID);
+  @imap_errors();
+  if (!is_array($uids) || empty($uids)) { return array(true, 0, ''); }
+
+  $latest = '';
+  $ov = @imap_fetch_overview($conn, implode(',', array_slice(array_values($uids), 0, 100)), FT_UID);
+  if (is_array($ov)) {
+    foreach ($ov as $o) {
+      if (!empty($o->date)) {
+        $ts = strtotime($o->date);
+        if ($ts && ($latest === '' || $ts > strtotime($latest))) { $latest = date('Y-m-d H:i:s', $ts); }
+      }
+    }
+  }
+  return array(true, count($uids), $latest);
+}
+
+/**
+ * 找出「已发送」文件夹。
+ * 和垃圾箱一样**不能硬编码名字**（Gmail 中文账号下是 `[Gmail]/已发邮件`），
+ * 按常见名字精确匹配 + 子串兜底。
+ */
+function wwe_sent_folder($conn, $ref) {
+  $folders = wwe_list_folders($conn, $ref);
+  if (empty($folders)) { return ''; }
+  static $exact = array(
+    'sent', 'sent items', 'sent messages', 'sent mail', 'sent-mail', 'sentitems',
+    'gesendet', 'éléments envoyés', 'enviados', 'inviati', 'verzonden',
+    '已发送', '已寄郵件', '寄件備份', '已發送', '送信済み', '보낸 편지함',
+  );
+  $cands = array();
+  foreach ($folders as $f) {
+    $leaf = mb_strtolower(wwe_folder_leaf($f), 'UTF-8');
+    if ($leaf !== '') { $cands[$f] = $leaf; }
+  }
+  foreach ($cands as $full => $leaf) {
+    if (in_array($leaf, $exact, true)) { return $full; }
+  }
+  foreach ($cands as $full => $leaf) {
+    if (strpos($leaf, 'sent') !== false || mb_strpos($leaf, '发送', 0, 'UTF-8') !== false
+        || mb_strpos($leaf, '寄件', 0, 'UTF-8') !== false) { return $full; }
+  }
+  return '';
 }

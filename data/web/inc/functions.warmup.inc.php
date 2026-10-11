@@ -333,9 +333,15 @@ function warmup_run($pdo, $force = false) {
       } catch (Exception $e) {
         error_log('warmup: 写入 warmup_messages 失败: ' . $e->getMessage());
       }
-      // 封与封之间也留间隔，避免同秒连发
+      // 封与封之间留间隔，避免同秒连发。
+      // 区间取自计划的 jitter_min（该列原先定义了却**从未被读取** ——
+      // 实际间隔一直是硬编码的 5–25 秒，管理员在配置层调不动）。
+      // 下限 5 秒兜底，防止被配成 0 导致连发。
       if ($i < $batch - 1) {
-        sleep(random_int(5, 25));
+        $jmin = (int)(isset($plan['jitter_min']) ? $plan['jitter_min'] : 30);
+        if ($jmin < 5)   { $jmin = 5; }
+        if ($jmin > 300) { $jmin = 300; }
+        sleep(random_int($jmin, (int)ceil($jmin * 1.6)));
       }
     }
 
@@ -455,12 +461,14 @@ function warmup_delivery_stats($pdo, $days = 30) {
         SUM(`result` = 'spam')    AS spam,
         SUM(`result` = 'missing') AS missing,
         SUM(`result` = 'unknown') AS unknown,
-        SUM(`replied_at` IS NOT NULL) AS replied
+        SUM(`replied_at` IS NOT NULL) AS replied,
+        SUM(`rescued_at` IS NOT NULL) AS rescued,
+        SUM(`peer_replied_at` IS NOT NULL) AS peer_replied
       FROM `warmup_messages`
       WHERE `sent_at` >= DATE_SUB(NOW(), INTERVAL :d DAY)");    $row->bindValue(':d', $days, PDO::PARAM_INT);
     $row->execute();
     $r = $row->fetch(PDO::FETCH_ASSOC) ?: array();
-    foreach (array('total','sent_ok','send_fail','inbox','spam','missing','unknown','replied') as $k) {
+    foreach (array('total','sent_ok','send_fail','inbox','spam','missing','unknown','replied','rescued','peer_replied') as $k) {
       $out[$k] = (int)($r[$k] ?? 0);
     }
     // 分母只算**已经判定出结果**的：unknown/missing 既不是进箱也不是垃圾箱，
@@ -567,6 +575,41 @@ function warmup_check_deliveries($pdo, $limit = 20) {
     } finally {
       @imap_close($conn);
     }
+
+    // 顺带判定「对方是否主动回过信」：在它自己的「已发送」里找发给该计划发件人的邮件。
+    // 这是比"我们代它回"更真实的互动信号，之前只是一个从未接线的空函数
+    // (wwe_count_from)，现在真正接上了（见 wwe_check_peer_reply）。
+    try {
+      list($c2, $e2) = wwe_connect($cred, 'INBOX');
+      if ($c2 !== false) {
+        $sentFolder = wwe_sent_folder($c2, wwe_ref($cred));
+        if ($sentFolder !== '') {
+          $pairs = array();
+          foreach ($msgs as $mm) {
+            $sender = (string)$pdo->query("SELECT `sender` FROM `warmup_plans`
+                                            WHERE `id` = " . (int)$mm['plan_id'] . " LIMIT 1")->fetchColumn();
+            if ($sender !== '' && $sender !== false) { $pairs[$sender] = true; }
+          }
+          foreach (array_keys($pairs) as $sender) {
+            list($okc, $cnt, $latest) = wwe_check_peer_reply($c2, $sentFolder, $sender, 30);
+            if ($okc && $cnt > 0) {
+              // 该收件人对这个发件人确实回过信 → 标记本批次相关消息
+              $up = $pdo->prepare("UPDATE `warmup_messages` m
+                                     JOIN `warmup_plans` p ON p.`id` = m.`plan_id`
+                                      SET m.`peer_replied_at` = :t
+                                    WHERE m.`recipient_id` = :r AND p.`sender` = :s
+                                      AND m.`peer_replied_at` IS NULL");
+              $up->execute(array(':t' => ($latest !== '' ? $latest : date('Y-m-d H:i:s')),
+                                 ':r' => (int)$rid, ':s' => $sender));
+            }
+          }
+        }
+        @imap_close($c2);
+      }
+    } catch (Exception $e) {
+      error_log('warmup: 对方回信判定失败: ' . $e->getMessage());
+    }
+
     // 顺带更新账号的统计与最后检查时间
     try {
       $u = $pdo->prepare("UPDATE `warmup_recipients` r SET

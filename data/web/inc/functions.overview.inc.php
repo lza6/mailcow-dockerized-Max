@@ -305,6 +305,8 @@ function ov_warmup_state($pdo) {
         'max_count' => (int)$p['max_count'], 'total_days' => (int)$p['total_days'],
         'started_on' => (string)$p['started_on'],
         'day' => $day, 'day_quota' => warmup_daily_quota($p),
+        // 兼容旧消费者（warmup.js 读 day_index）；新代码请用 day
+        'day_index' => $day,
         'days_left' => max(0, (int)$p['total_days'] - $day),
         'sent_today' => (int)$p['sent_today'],
         // 今天调度器是否真的跑过 —— 只靠 sent_today 无法区分

@@ -379,7 +379,16 @@ $(document).ready(function () {
       (st.today_inbox_rate === null || st.today_inbox_rate === undefined)
         ? '今日暂无判定' : ('今日进箱率 ' + st.today_inbox_rate + '%'));
     $('#ov_wu_replied').text(st.replied || 0);
-    $('#ov_wu_rescued').text(st.inbox || 0);
+    // 已救援必须是**真统计**（rescued_at 非空的条数）。
+    // 之前这里渲染的是 st.inbox —— 那是「累计进箱数」，
+    // 而这个指标从来没有被真正统计过，等于展示一个假数字。
+    $('#ov_wu_rescued').text(st.rescued || 0);
+    if (st.peer_replied !== undefined) {
+      $('#ov_wu_box_state').html(
+        (w.secretbox ? '<span class="text-success">保管箱可用</span>'
+                     : '<span class="text-danger">保管箱不可用</span>') +
+        ' · 对方主动回信 ' + (st.peer_replied || 0) + ' 封');
+    }
     $('#ov_wu_box_state').html(w.secretbox
       ? '<span class="text-success">凭据保管箱可用</span>'
       : '<span class="text-danger">凭据保管箱不可用（无法保存应用专用密码）</span>');

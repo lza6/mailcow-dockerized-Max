@@ -8,7 +8,7 @@ function init_db_schema()
   //    init_db_schema() 在 `versions.db_schema` 与本值相等时**直接 return**，
   //    不会执行下面的表结构差异 —— 忘了改的话新表永远不会被建出来，
   //    而且不报错（业务侧只会静默写不进数据）。
-  //    $db_version = "13102026_0100";
+  //    $db_version = "14102026_0100";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
@@ -264,8 +264,11 @@ function init_db_schema()
           "primary" => array(
             "" => array("id")
           ),
-          "key" => array(
-            "email" => array("email")
+          "unique" => array(
+            // email 必须是**唯一键**，不能只靠应用层 SELECT-then-INSERT 防重：
+            // 两个标签页同时点「添加并验证」时两边的 COUNT 都会是 0，
+            // 于是同一个账号被插成两条 —— 重复收信、统计各算一半、IMAP 连接翻倍。
+            "u_email" => array("email")
           )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
@@ -290,7 +293,12 @@ function init_db_schema()
           // 把队列头部堵死 —— 新邮件再也处理不到，且界面完全看不出来。
           "reply_attempts" => "INT NOT NULL DEFAULT '0'",
           "rescue_attempts" => "INT NOT NULL DEFAULT '0'",
-          "last_attempt_at" => "DATETIME(0) NULL DEFAULT NULL"
+          "last_attempt_at" => "DATETIME(0) NULL DEFAULT NULL",
+          // 从垃圾箱救回来的时间。没有它的话，「已救援」这个卡片只能拿
+          // 「累计进箱数」冒充 —— 展示的是一个从来没被统计过的假指标。
+          "rescued_at" => "DATETIME(0) NULL DEFAULT NULL",
+          // 对方（发件人）是否主动回信了 —— 这是比"我们代它回"更真实的互动信号
+          "peer_replied_at" => "DATETIME(0) NULL DEFAULT NULL"
         ),
         "keys" => array(
           "primary" => array(

@@ -117,7 +117,5 @@ function sb_decrypt($blob) {
   return $pt;
 }
 
-/** 只展示"是否已设置"，永远不把值吐出去（用于列表页） */
-function sb_is_set($blob) {
-  return $blob !== null && $blob !== '';
-}
+// （曾有 sb_is_set()，但全仓库无调用 —— "是否已配置"的判定已在 SQL 里用
+//   `secret_enc IS NOT NULL AND secret_enc <> ''` 表达，故删除避免死代码误导。）
