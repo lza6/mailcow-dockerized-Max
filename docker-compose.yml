@@ -138,6 +138,9 @@ services:
         - ./data/conf/sogo/:/etc/sogo/:z
         - ./data/conf/rspamd/meta_exporter:/meta_exporter:ro,z
         - ./data/conf/phpfpm/crons:/crons:z
+        # 养号用到的「可再取出」凭据（收件人账号的应用专用密码）用可逆加密存放，
+        # 密钥文件放在这里 —— 不在 Web 根目录下，也不进仓库（见 .gitignore）。
+        - ./data/conf/warmup:/warmup-secrets:z
         - ./data/conf/phpfpm/sogo-sso/:/etc/sogo-sso/:z
         - ./data/conf/phpfpm/php-fpm.d/pools.conf:/usr/local/etc/php-fpm.d/z-pools.conf:Z
         - ./data/conf/phpfpm/php-conf.d/opcache-recommended.ini:/usr/local/etc/php/conf.d/opcache-recommended.ini:Z

@@ -27,6 +27,8 @@ catch (PDOException $e) {
 }
 
 require_once(__DIR__ . '/../web/inc/functions.warmup.inc.php');
+require_once(__DIR__ . '/../web/inc/functions.secretbox.inc.php');
+require_once(__DIR__ . '/../web/inc/functions.warmup_ext.inc.php');
 
 // 主库判定：多节点部署时只在 master 上跑
 $isMaster = getenv('MASTER');
@@ -43,6 +45,25 @@ catch (Exception $e) {
   exit(1);
 }
 
+// ---- 投递判定与互动（每 15 分钟一轮）----
+// 不跟发信同频：① IMAP 连接成本高；② 刚发出的邮件要等对方服务器归档完才查得到。
+if ((int)date('i') % 15 === 0) {
+  try {
+    $c = warmup_check_deliveries($pdo, 20);
+    echo '[warmup] deliveries checked=' . $c['checked'] . ' inbox=' . $c['inbox']
+       . ' spam=' . $c['spam'] . ' missing=' . $c['missing'] . PHP_EOL;
+    foreach (array_slice($c['errors'], 0, 3) as $e) { echo '  ! ' . $e . PHP_EOL; }
+  } catch (Exception $e) {
+    fwrite(STDERR, '[warmup] 投递判定失败: ' . $e->getMessage() . PHP_EOL);
+  }
+  try {
+    $x = warmup_interact($pdo, 10);
+    echo '[warmup] interact rescued=' . $x['rescued'] . ' replied=' . $x['replied'] . PHP_EOL;
+    foreach (array_slice($x['errors'], 0, 3) as $e) { echo '  ! ' . $e . PHP_EOL; }
+  } catch (Exception $e) {
+    fwrite(STDERR, '[warmup] 互动失败: ' . $e->getMessage() . PHP_EOL);
+  }
+}
 $parts = array();
 $parts[] = 'plans=' . $r['checked'];
 $parts[] = 'sent=' . $r['sent'];

@@ -80,3 +80,6 @@ data/conf/postfix/postfix-tlspol
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# 养号凭据保管箱的密钥 —— 绝不入库
+data/conf/warmup/

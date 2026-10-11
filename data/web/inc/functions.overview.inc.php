@@ -280,6 +280,9 @@ function ov_warmup_state($pdo) {
   if (!function_exists('warmup_daily_quota')) {
     require_once __DIR__ . '/functions.warmup.inc.php';
   }
+  if (!function_exists('sb_available')) {
+    require_once __DIR__ . '/functions.secretbox.inc.php';
+  }
   $plans = array(); $recipients = array(); $logs = array();
   $sentToday = 0; $sentTotal = 0; $failTotal = 0;
 
@@ -292,6 +295,9 @@ function ov_warmup_state($pdo) {
       FROM `warmup_plans` p ORDER BY p.`id` ASC")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rows as $p) {
       $day = warmup_day_index($p);
+      // 「下一封什么时候发」直接复用调度器那套算法（warmup_next_send），
+      // 不在这里另算一遍 —— 否则界面显示的时刻会和实际发送时刻漂移。
+      $next = warmup_next_send($p);
       $plans[] = array(
         'id' => (int)$p['id'], 'domain' => (string)$p['domain'], 'sender' => (string)$p['sender'],
         'status' => (string)$p['status'], 'pause_reason' => (string)$p['pause_reason'],
@@ -306,6 +312,7 @@ function ov_warmup_state($pdo) {
         'ran_today' => ((int)$p['ran_today'] > 0),
         'sent_all' => (int)$p['sent_all'], 'fail_all' => (int)$p['fail_all'],
         'last_run' => (string)$p['last_run'],
+        'next_at' => $next['at'], 'next_state' => $next['state'],
       );
       $sentTotal += (int)$p['sent_all'];
       $failTotal += (int)$p['fail_all'];
@@ -313,9 +320,27 @@ function ov_warmup_state($pdo) {
   } catch (Exception $e) {}
 
   try {
-    foreach ($pdo->query("SELECT `id`,`email`,`label`,`active` FROM `warmup_recipients` ORDER BY `id` ASC")->fetchAll(PDO::FETCH_ASSOC) as $r) {
-      $recipients[] = array('id' => (int)$r['id'], 'email' => (string)$r['email'],
-                            'label' => (string)$r['label'], 'active' => (int)$r['active']);
+    // 注意：**不取 secret_enc**，界面只显示「是否已配置密码」
+    $rows = $pdo->query("SELECT `id`,`email`,`label`,`active`,`secret_enc` IS NOT NULL AS `has_secret`,
+                                `verify_status`,`last_verify`,`last_check`,
+                                `inbox_count`,`spam_count`,`reply_count`,`auto_reply`,`rescue_spam`,
+                                `imap_host`,`imap_port`,`smtp_host`,`smtp_port`
+                           FROM `warmup_recipients` ORDER BY `id` ASC")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as $r) {
+      $has = (int)$r['has_secret'] === 1;
+      $recipients[] = array(
+        'id' => (int)$r['id'], 'email' => (string)$r['email'], 'label' => (string)$r['label'],
+        'active' => (int)$r['active'],
+        'has_secret' => $has,
+        'verify_status' => (string)$r['verify_status'],
+        'last_verify' => (string)$r['last_verify'],
+        'last_check' => (string)$r['last_check'],
+        'inbox_count' => (int)$r['inbox_count'],
+        'spam_count' => (int)$r['spam_count'],
+        'reply_count' => (int)$r['reply_count'],
+        'auto_reply' => (int)$r['auto_reply'],
+        'rescue_spam' => (int)$r['rescue_spam'],
+      );
     }
   } catch (Exception $e) {}
 
@@ -327,19 +352,42 @@ function ov_warmup_state($pdo) {
                           ORDER BY l.`id` DESC LIMIT 50")->fetchAll(PDO::FETCH_ASSOC);
   } catch (Exception $e) {}
 
+  // 逐封明细（发给谁、Message-ID、落在收件箱还是垃圾箱）—— 最近 50 封
+  $messages = array();
+  try {
+    $messages = $pdo->query("SELECT m.`id`, m.`plan_id`, m.`recipient`, m.`message_id`,
+                                    m.`subject`, m.`sent_at`, m.`send_ok`, m.`fail_reason`,
+                                    m.`result`, m.`checked_at`, m.`replied_at`, p.`sender`
+                               FROM `warmup_messages` m
+                               LEFT JOIN `warmup_plans` p ON p.`id` = m.`plan_id`
+                              ORDER BY m.`id` DESC LIMIT 50")->fetchAll(PDO::FETCH_ASSOC);
+  } catch (Exception $e) {}
+
   try {
     $sentToday = (int)$pdo->query("SELECT COALESCE(SUM(`sent`),0) FROM `warmup_log` WHERE `run_date`=CURDATE()")->fetchColumn();
   } catch (Exception $e) {}
+
+  // 进箱率/垃圾箱率：来自收件人邮箱的真实核对结果
+  $stats = array('total'=>0,'inbox'=>0,'spam'=>0,'unknown'=>0,'missing'=>0,
+                 'inbox_rate'=>null,'spam_rate'=>null,'today_total'=>0,
+                 'today_inbox'=>0,'today_spam'=>0,'today_inbox_rate'=>null,
+                 'today_spam_rate'=>null,'replied'=>0,'sent_ok'=>0,'send_fail'=>0);
+  if (function_exists('warmup_delivery_stats')) {
+    try { $stats = warmup_delivery_stats($pdo, 30); } catch (Exception $e) {}
+  }
 
   return array(
     'plans'       => $plans,
     'recipients'  => $recipients,
     'logs'        => $logs,
+    'messages'    => $messages,
+    'stats'       => $stats,
     'sent_today'  => $sentToday,
     'sent_total'  => $sentTotal,
     'fail_total'  => $failTotal,
     'global_cap'  => defined('WARMUP_GLOBAL_DAILY_CAP') ? WARMUP_GLOBAL_DAILY_CAP : 30,
     'max_per_run' => defined('WARMUP_MAX_PER_RUN') ? WARMUP_MAX_PER_RUN : 3,
+    'secretbox'   => function_exists('sb_available') ? sb_available() : false,
     'window'      => (defined('WARMUP_WINDOW_START_HOUR') ? WARMUP_WINDOW_START_HOUR : 8) . ':00 - '
                    . (defined('WARMUP_WINDOW_END_HOUR') ? WARMUP_WINDOW_END_HOUR : 20) . ':00',
   );

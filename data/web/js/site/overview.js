@@ -75,6 +75,20 @@ $(document).ready(function () {
 
   // 出站中继展示：优先显示**号池账号名**，主机名放小字；
   // 只配了中继但没进号池时退化为显示主机名；两者都没有就是直发。
+  /* ------------------------------------------------------------------ *
+   * 以「某个邮箱」的身份打开 Webmail。
+   *
+   * ⚠️ 不能直接用 /SOGo/：SOGo 的登录态由 mailcow 会话驱动
+   * （nginx 的 auth_request -> /sogo-auth-verify -> sogo-auth.php，
+   *  通过 x-webobjects-remote-user 传当前登录用户），
+   * 所以点 /SOGo/ 进去的永远是**你当前登录的那个人**（管理员就是管理员自己）。
+   * mailcow 官方的做法是走 /sogo-auth.php?login=<邮箱>（见官方 mailbox.js），
+   * 它会把会话切换到该邮箱（dual-login）—— 想回管理员身份就退出登录。
+   * 该入口需要 mailcow.conf 里 ALLOW_ADMIN_EMAIL_LOGIN=y。
+   * ------------------------------------------------------------------ */
+  function sogoLogin(user) {
+    return '/sogo-auth.php?login=' + encodeURIComponent(user);
+  }
   function relayCell(acct, host) {
     if (acct && acct.label) {
       return '<span class="badge bg-primary">' + esc(acct.label) + '</span>' +
@@ -179,7 +193,7 @@ $(document).ready(function () {
                     : '<span class="text-muted">0</span>') + '</td>' +
         '<td>' + esc(q) + '</td>' +
         '<td class="text-nowrap">' +
-          '<a class="btn btn-sm btn-outline-primary" target="_blank" rel="noopener" href="' + WEBMAIL + '">进 Webmail</a> ' +
+          '<a class="btn btn-sm btn-outline-primary" href="' + sogoLogin(m.username) + '">以该邮箱进 Webmail</a> ' +
           '<button class="btn btn-sm btn-outline-warning ov_reset_pw" data-user="' + esc(m.username) + '">重置密码</button> ' +
           '<button class="btn btn-sm btn-outline-secondary ov_copy" data-user="' + esc(m.username) + '">复制</button> ' +
           '<button class="btn btn-sm btn-outline-secondary ov_toggle" data-user="' + esc(m.username) + '">启/停</button>' +
@@ -280,30 +294,65 @@ $(document).ready(function () {
     if (!w) { $('#ov_warmup_card').hide(); return; }
     $('#ov_warmup_card').show();
 
+    var st = w.stats || {};
     $('#ov_wu_rule').text('发送窗口 ' + w.window + ' · 单次最多 ' + w.max_per_run +
                           ' 封 · 全局每日上限 ' + w.global_cap + ' 封');
     $('#ov_wu_today').text(w.sent_today);
     $('#ov_wu_cap').text(w.global_cap);
     $('#ov_wu_sent').text(w.sent_total);
     $('#ov_wu_fail').text(w.fail_total);
-    $('#ov_wu_plans').text(w.plans.length);
-    var rcOn = w.recipients.filter(function (x) { return x.active === 1; }).length;
-    $('#ov_wu_rc').text(rcOn + ' / ' + w.recipients.length);
 
-    // 计划表
+    // 进箱率 / 垃圾箱率 —— 来自收件人邮箱里的**真实核对**，不是估算
+    function rateCell(rate, okGood) {
+      if (rate === null || rate === undefined) { return '<span class="text-muted">未判定</span>'; }
+      var cls = okGood ? (rate >= 90 ? 'text-success' : (rate >= 70 ? 'text-warning' : 'text-danger'))
+                       : (rate <= 5 ? 'text-success' : (rate <= 20 ? 'text-warning' : 'text-danger'));
+      return '<span class="' + cls + ' fw-bold">' + rate + '%</span>';
+    }
+    $('#ov_wu_ibox_rate').html(rateCell(st.inbox_rate, true));
+    $('#ov_wu_ibox_sub').text('进箱 ' + (st.inbox || 0) + ' / 已判定 ' +
+      ((st.inbox || 0) + (st.spam || 0)));
+    $('#ov_wu_spam_rate').html(rateCell(st.spam_rate, false));
+    $('#ov_wu_spam_sub').text('垃圾箱 ' + (st.spam || 0) + ' / 待判定 ' + (st.unknown || 0));
+    $('#ov_wu_today_split').text((st.today_inbox || 0) + ' / ' + (st.today_spam || 0));
+    $('#ov_wu_today_rate').text(
+      (st.today_inbox_rate === null || st.today_inbox_rate === undefined)
+        ? '今日暂无判定' : ('今日进箱率 ' + st.today_inbox_rate + '%'));
+    $('#ov_wu_replied').text(st.replied || 0);
+    $('#ov_wu_rescued').text(st.inbox || 0);
+    $('#ov_wu_box_state').html(w.secretbox
+      ? '<span class="text-success">凭据保管箱可用</span>'
+      : '<span class="text-danger">凭据保管箱不可用（无法保存应用专用密码）</span>');
+
+    $('#ov_wu_howto').html(
+      '判定来源：系统把每封养号邮件的 <code>Message-ID</code> 记下来，再用收件人账号的 IMAP ' +
+      '去它自己的收件箱/垃圾箱里反查落点。' +
+      '<b>只统计已判定的邮件</b>（待判定/找不到不算进分母，否则垃圾箱率会被稀释）。' +
+      '未配置应用专用密码的收件账号无法判定。');
+
+    // ---- 计划表 ----
     var h = '';
     if (!w.plans.length) {
-      h = '<tr><td colspan="7" class="text-center text-muted py-3">还没有养号计划</td></tr>';
+      h = '<tr><td colspan="8" class="text-center text-muted py-3">还没有养号计划</td></tr>';
     }
     w.plans.forEach(function (p) {
       var stCls = p.status === 'active' ? 'bg-success'
                 : (p.status === 'paused' ? 'bg-warning text-dark' : 'bg-secondary');
       var stTxt = p.status === 'active' ? '进行中' : (p.status === 'paused' ? '已暂停' : p.status);
-      // 今日没跑过要显式提示：分不清「配额为 0」与「调度器没跑」会掩盖故障
       var today = '<span class="text-success fw-bold">' + p.sent_today + '</span>';
       if (!p.ran_today) {
         today = '<span class="text-danger fw-bold">' + p.sent_today + '</span>' +
                 '<div><small class="text-danger">今日未运行</small></div>';
+      }
+      // 下一封：直接显示调度器算出来的时刻，并标出状态
+      var next = '<span class="text-muted">—</span>';
+      if (p.next_at) {
+        var nc = p.next_state === 'due' ? 'text-danger fw-bold'
+               : (p.next_state === 'pending' ? 'text-success' : 'text-muted');
+        var nt = { due: '已到点，等待执行', pending: '待发送',
+                   today_done: '今日配额已用完', expired: '已到期', paused: '已暂停' }[p.next_state] || p.next_state;
+        next = '<span class="' + nc + '">' + esc(p.next_at) + '</span>' +
+               '<div><small class="text-muted">' + esc(nt) + '</small></div>';
       }
       h += '<tr>' +
         '<td><code class="small">' + esc(p.sender) + '</code>' +
@@ -311,11 +360,23 @@ $(document).ready(function () {
         '<td>第 ' + p.day + ' / ' + p.total_days + ' 天' +
           (p.days_left > 0 ? '<div><small class="text-muted">剩 ' + p.days_left + ' 天</small></div>'
                            : '<div><small class="text-danger">已到期</small></div>') + '</td>' +
+        '<td class="text-nowrap">' +
+          '<div class="input-group input-group-sm" style="width:8.5rem">' +
+            '<input type="number" class="form-control ov_wu_q" data-id="' + p.id +
+              '" value="' + p.start_count + '" min="1" max="50" title="起量">' +
+            '<input type="number" class="form-control ov_wu_s" data-id="' + p.id +
+              '" value="' + p.step + '" min="0" max="20" title="日增">' +
+            '<input type="number" class="form-control ov_wu_m" data-id="' + p.id +
+              '" value="' + p.max_count + '" min="1" max="200" title="上限">' +
+          '</div>' +
+          '<div><small class="text-muted">当前今日配额 <b>' + p.day_quota + '</b> 封（起量/日增/上限）</small></div>' +
+          '<button class="btn btn-sm btn-link p-0 ov_wu_quota_set" data-id="' + p.id + '">保存配额</button>' +
+        '</td>' +
         '<td>' + today + ' / ' + p.day_quota + '</td>' +
+        '<td>' + next + '</td>' +
         '<td>' + p.sent_all + ' <span class="text-muted">成</span> / ' + p.fail_all + ' <span class="text-muted">败</span></td>' +
         '<td><span class="badge ' + stCls + '">' + esc(stTxt) + '</span>' +
           (p.pause_reason ? '<div><small class="text-danger">' + esc(p.pause_reason) + '</small></div>' : '') + '</td>' +
-        '<td><small>' + esc(p.last_run || '—') + '</small></td>' +
         '<td class="text-nowrap">' +
           '<button class="btn btn-sm btn-outline-secondary ov_wu_status" data-id="' + p.id +
             '" data-status="' + (p.status === 'active' ? 'paused' : 'active') + '">' +
@@ -325,43 +386,92 @@ $(document).ready(function () {
     });
     body('#ov_wu_plan_body', '#ov_tbl_wuplan').html(h);
 
-    // 收件人
+    // ---- 收件人账号 ----
     var r2 = '';
     if (!w.recipients.length) {
-      r2 = '<tr><td colspan="4" class="text-center text-muted py-3">还没有收件人，养号不会发出任何邮件</td></tr>';
+      r2 = '<tr><td colspan="6" class="text-center text-muted py-3">' +
+           '还没有收件人，养号不会发出任何邮件</td></tr>';
     }
     w.recipients.forEach(function (x) {
+      var vs = String(x.verify_status || '');
+      var vCls = vs.indexOf('通过') >= 0 ? 'bg-success' : (vs === '' ? 'bg-secondary' : 'bg-danger');
       r2 += '<tr>' +
-        '<td><code class="small">' + esc(x.email) + '</code></td>' +
-        '<td><small>' + esc(x.label || '—') + '</small></td>' +
-        '<td>' + (x.active === 1 ? '<span class="badge bg-success">启用</span>'
-                                 : '<span class="badge bg-secondary">停用</span>') + '</td>' +
+        '<td><code class="small">' + esc(x.email) + '</code>' +
+          (x.label ? '<div><small class="text-muted">' + esc(x.label) + '</small></div>' : '') + '</td>' +
+        '<td>' + (x.has_secret
+          ? '<span class="badge bg-success">已配置</span>'
+          : '<span class="badge bg-secondary">未配置</span>') + '</td>' +
+        '<td><span class="badge ' + vCls + '">' + esc(vs || '未验证') + '</span>' +
+          (x.last_verify ? '<div><small class="text-muted">' + esc(x.last_verify) + '</small></div>' : '') + '</td>' +
+        '<td>' + x.inbox_count + ' / ' + x.spam_count + ' / ' + x.reply_count +
+          (x.last_check ? '<div><small class="text-muted">核对于 ' + esc(x.last_check) + '</small></div>' : '') + '</td>' +
+        '<td>' + (x.auto_reply === 1 ? '<span class="badge bg-primary">自动回复</span>' : '') +
+          (x.rescue_spam === 1 ? ' <span class="badge bg-info text-dark">垃圾箱救援</span>' : '') +
+          (x.auto_reply === 0 && x.rescue_spam === 0 ? '<span class="text-muted">—</span>' : '') + '</td>' +
         '<td class="text-nowrap">' +
+          '<button class="btn btn-sm btn-outline-primary ov_wu_rc_verify" data-id="' + x.id + '">验证 IMAP</button> ' +
+          '<button class="btn btn-sm btn-outline-secondary ov_wu_rc_edit" data-id="' + x.id +
+            '" data-email="' + esc(x.email) + '">改密码</button> ' +
           '<button class="btn btn-sm btn-outline-secondary ov_wu_rc_toggle" data-id="' + x.id + '">启/停</button> ' +
           '<button class="btn btn-sm btn-outline-danger ov_wu_rc_del" data-id="' + x.id + '">删除</button>' +
+          '<div class="mt-1">' +
+            '<button class="btn btn-sm btn-link p-0 ov_wu_rc_ar" data-id="' + x.id +
+              '" data-v="' + (x.auto_reply === 1 ? 0 : 1) + '">' +
+              (x.auto_reply === 1 ? '关闭自动回复' : '开启自动回复') + '</button> · ' +
+            '<button class="btn btn-sm btn-link p-0 ov_wu_rc_rs" data-id="' + x.id +
+              '" data-v="' + (x.rescue_spam === 1 ? 0 : 1) + '">' +
+              (x.rescue_spam === 1 ? '关闭垃圾箱救援' : '开启垃圾箱救援') + '</button>' +
+          '</div>' +
         '</td></tr>';
     });
     body('#ov_wu_rc_body', '#ov_tbl_wurc').html(r2);
 
-    // 日志
+    // ---- 逐封明细 ----
+    var mm = '';
+    var msgs = w.messages || [];
+    if (!msgs.length) {
+      mm = '<tr><td colspan="6" class="text-center text-muted py-3">' +
+           '还没有逐封记录（下一次养号发送后就会出现）</td></tr>';
+    }
+    msgs.forEach(function (x) {
+      var res = String(x.result || 'unknown');
+      var rCls = res === 'inbox' ? 'bg-success'
+               : (res === 'spam' ? 'bg-danger'
+               : (res === 'missing' ? 'bg-warning text-dark' : 'bg-secondary'));
+      var rTxt = { inbox: '进收件箱', spam: '进垃圾箱', missing: '找不到', unknown: '待判定' }[res] || res;
+      if (parseInt(x.send_ok, 10) !== 1) { rCls = 'bg-danger'; rTxt = '发送失败'; }
+      mm += '<tr>' +
+        '<td><small>' + esc(x.sent_at) + '</small></td>' +
+        '<td><small>' + esc(x.sender || ('计划#' + x.plan_id)) + '</small></td>' +
+        '<td><small>' + esc(x.recipient) + '</small></td>' +
+        '<td><span class="badge ' + rCls + '">' + rTxt + '</span>' +
+          (x.checked_at ? '<div><small class="text-muted">' + esc(x.checked_at) + '</small></div>' : '') +
+          (x.fail_reason ? '<div><small class="text-danger">' + esc(x.fail_reason) + '</small></div>' : '') + '</td>' +
+        '<td>' + (x.replied_at ? '<span class="badge bg-success">已回复</span>' +
+            '<div><small class="text-muted">' + esc(x.replied_at) + '</small></div>'
+          : '<span class="text-muted">—</span>') + '</td>' +
+        '<td><small class="text-muted">' + esc(x.message_id || '—') + '</small></td>' +
+      '</tr>';
+    });
+    body('#ov_wu_msg_body', '#ov_tbl_wumsg').html(mm);
+
+    // ---- 按天汇总 ----
     var l = '';
     if (!w.logs.length) {
       l = '<tr><td colspan="6" class="text-center text-muted py-3">暂无发送记录</td></tr>';
     }
     w.logs.forEach(function (x) {
-      var det = String(x.detail || '');
       l += '<tr>' +
         '<td><small>' + esc(x.run_at) + '</small></td>' +
         '<td><small>' + esc(x.sender || ('计划#' + x.plan_id)) + '</small></td>' +
         '<td>' + x.planned + '</td>' +
         '<td>' + (x.sent > 0 ? '<span class="text-success fw-bold">' + x.sent + '</span>' : '0') + '</td>' +
         '<td>' + (x.failed > 0 ? '<span class="text-danger fw-bold">' + x.failed + '</span>' : '0') + '</td>' +
-        '<td><small class="text-muted">' + esc(det.slice(0, 300)) + '</small></td>' +
+        '<td><small class="text-muted">' + esc(String(x.detail || '').slice(0, 300)) + '</small></td>' +
       '</tr>';
     });
     body('#ov_wu_log_body', '#ov_tbl_wulog').html(l);
   }
-
   function renderAudit(rows) {
     if (!rows || !rows.length) {
       body('#ov_audit_body', '#ov_tbl_audit').html('<tr><td colspan="6" class="text-center text-muted py-4">暂无记录</td></tr>');
@@ -570,6 +680,43 @@ $(document).ready(function () {
     load();
   });
 
+  // 批量显示/隐藏全部账号 Key。
+  // 每把 Key 都是单独向服务端要一次（reveal_secret），因此**每把都会单独落审计** ——
+  // 不存在"点一下就悄悄拿到全部密钥"的路径。
+  $('#ov_pool_reveal').on('click', function () {
+    var hasResend = Object.keys(revealed).some(function (k) { return k.indexOf('resend:') === 0; });
+    if (hasResend) {
+      Object.keys(revealed).forEach(function (k) {
+        if (k.indexOf('resend:') === 0) { delete revealed[k]; }
+      });
+      load();
+      return;
+    }
+    var ids = [];
+    $('#ov_pool_body tr').each(function () {
+      var id = $(this).find('.ov_show_key').data('id');
+      if (id) { ids.push(id); }
+    });
+    if (!ids.length) { notice('没有可显示的账号 Key', true); return; }
+    var btn = $(this).prop('disabled', true).text('读取中…');
+    var i = 0, fail = 0;
+    (function next() {
+      if (i >= ids.length) {
+        btn.prop('disabled', false).text('显示/隐藏 Key');
+        notice('已显示 ' + (ids.length - fail) + ' 把 Key（每把均已记入审计）', fail > 0);
+        load();
+        return;
+      }
+      var id = ids[i++];
+      post({ action: 'reveal_secret', kind: 'resend', id: id })
+        .done(function (d) {
+          if (d && d.ok) { revealed['resend:' + id] = d.value; } else { fail++; }
+        })
+        .fail(function () { fail++; })
+        .always(next);
+    })();
+  });
+
   $('#ov_pool_limit_set').on('click', function () {
     act(RP, { action: 'set_limit', limit: $('#ov_pool_limit_in').val() }, '域名上限已更新');
   });
@@ -673,9 +820,27 @@ $(document).ready(function () {
   $('#ov_wu_rc_add').on('click', function () {
     var e = $('#ov_wu_rc_email').val();
     if (!e) { notice('请填入收件地址', true); return; }
-    act(WU, { action: 'add_recipient', email: e, label: $('#ov_wu_rc_label').val() }, '收件人已添加');
-    $('#ov_wu_rc_email').val('');
-    $('#ov_wu_rc_label').val('');
+    var b = $(this).prop('disabled', true).text('添加并验证中…');
+    post({
+      action: 'add_recipient',
+      email: e,
+      label: $('#ov_wu_rc_label').val(),
+      secret: $('#ov_wu_rc_secret').val(),
+      auto_reply: $('#ov_wu_rc_autoreply').is(':checked') ? 1 : 0,
+      rescue_spam: $('#ov_wu_rc_rescue').is(':checked') ? 1 : 0
+    }, WU)
+      .done(function (d) {
+        if (d && d.ok) {
+          var v = d.verify;
+          if (v) { notice(v.ok ? ('已添加，' + v.message) : ('已添加，但 ' + v.message), !v.ok); }
+          else { notice('收件人已添加（未填应用专用密码，无法核对进箱/垃圾箱）'); }
+          $('#ov_wu_rc_email,#ov_wu_rc_label,#ov_wu_rc_secret').val('');
+          $('#ov_wu_rc_autoreply,#ov_wu_rc_rescue').prop('checked', false);
+          load();
+        } else { notice((d && d.message) || '添加失败', true); }
+      })
+      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); })
+      .always(function () { b.prop('disabled', false).text('添加并验证'); });
   });
   $(document).on('click', '.ov_wu_rc_toggle', function () {
     act(WU, { action: 'toggle_recipient', id: $(this).data('id') });
@@ -683,5 +848,131 @@ $(document).ready(function () {
   $(document).on('click', '.ov_wu_rc_del', function () {
     if (!confirm('删除该收件人？')) { return; }
     act(WU, { action: 'delete_recipient', id: $(this).data('id') }, '收件人已删除');
+  });
+
+  /* ============ 养号扩展：投递核对 / 互动 / 配额 / 收件人账号 ============ */
+
+  // 手动触发「去收件人邮箱核对进箱还是垃圾箱」
+  $('#ov_wu_check_deliv').on('click', function () {
+    var b = $(this).prop('disabled', true).text('核对中…');
+    post({ action: 'check_deliveries' }, WU)
+      .done(function (d) {
+        if (d && d.ok) {
+          var r = d.result || {};
+          var msg = '核对完成：检查 ' + (r.checked || 0) + ' 封，进箱 ' + (r.inbox || 0) +
+                    '，垃圾箱 ' + (r.spam || 0) + '，找不到 ' + (r.missing || 0);
+          if (r.errors && r.errors.length) { msg += '；' + r.errors.length + ' 条错误：' + r.errors[0]; }
+          notice(msg, !!(r.errors && r.errors.length));
+          load();
+        } else { notice((d && d.message) || '核对失败', true); }
+      })
+      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); })
+      .always(function () { b.prop('disabled', false).text('核对投递（进箱/垃圾箱）'); });
+  });
+
+  // 手动触发互动：垃圾箱救援 + 代回信
+  $('#ov_wu_interact').on('click', function () {
+    var b = $(this).prop('disabled', true).text('执行中…');
+    post({ action: 'run_interact' }, WU)
+      .done(function (d) {
+        if (d && d.ok) {
+          var r = d.result || {};
+          var msg = '互动完成：救援 ' + (r.rescued || 0) + ' 封，回复 ' + (r.replied || 0) + ' 封';
+          if (r.errors && r.errors.length) { msg += '；' + r.errors.length + ' 条错误：' + r.errors[0]; }
+          notice(msg, !!(r.errors && r.errors.length));
+          load();
+        } else { notice((d && d.message) || '执行失败', true); }
+      })
+      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); })
+      .always(function () { b.prop('disabled', false).text('执行互动'); });
+  });
+
+  // 实时改「今日配额」：起量 / 日增 / 上限 三个数直接决定当天的配额
+  $(document).on('click', '.ov_wu_quota_set', function () {
+    var id = $(this).data('id');
+    var $row = $(this).closest('tr');
+    var start = $row.find('.ov_wu_q[data-id="' + id + '"]').val();
+    var step  = $row.find('.ov_wu_s[data-id="' + id + '"]').val();
+    var max   = $row.find('.ov_wu_m[data-id="' + id + '"]').val();
+    if (parseInt(start, 10) > parseInt(max, 10)) {
+      notice('起量不能大于上限', true); return;
+    }
+    act(WU, { action: 'edit_plan', id: id, start_count: start, step: step, max_count: max },
+        '配额已更新（起量 ' + start + ' / 日增 ' + step + ' / 上限 ' + max + '）');
+  });
+
+  // 一键为「还没有养号计划的活跃邮箱」批量建计划
+  $('#ov_wu_add_all').on('click', function () {
+    if (!confirm('将为所有「还没有养号计划」的启用邮箱各建一个计划（起量 2 / 日增 1 / 上限 20 / 30 天）。继续？')) { return; }
+    var b = $(this).prop('disabled', true).text('创建中…');
+    post({ action: 'add_plans_for_all' }, WU)
+      .done(function (d) {
+        if (d && d.ok) {
+          var msg = '已创建 ' + (d.created || 0) + ' 个计划';
+          if (d.skipped && d.skipped.length) { msg += '；跳过 ' + d.skipped.length + ' 个：' + d.skipped[0]; }
+          notice(msg);
+          load();
+        } else { notice((d && d.message) || '创建失败', true); }
+      })
+      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); })
+      .always(function () { b.prop('disabled', false).text('一键为全部未养号的域创建计划'); });
+  });
+
+  // 「怎么获取 Google 应用专用密码」—— 直接把步骤摆出来，不用去翻文档
+  $('#ov_wu_gp_help').on('click', function () {
+    alert(
+      '如何获取 Google 应用专用密码（应用专用密码 / App Password）\n\n' +
+      '前提：该 Google 账号必须已开启「两步验证」，否则 Google 不会提供应用专用密码。\n\n' +
+      '1. 用该账号登录 https://myaccount.google.com/\n' +
+      '2. 左侧「安全性」→ 两步验证（如未开启先开启）\n' +
+      '3. 页面底部「应用专用密码」（也可直接打开 https://myaccount.google.com/apppasswords）\n' +
+      '4. 输入一个名称，例如 mailcow-warmup，点「创建」\n' +
+      '5. Google 会显示 16 位密码（形如 abcd efgh ijkl mnop）。**空格可以去掉**\n' +
+      '6. 把这 16 位填到本页「应用专用密码」框里\n\n' +
+      '另外需要确认（一次性）：\n' +
+      '· Gmail 设置 → 转发和 POP/IMAP → 启用 IMAP\n' +
+      '· 若账号开启了「高级保护」，应用专用密码不可用，需要换一个普通账号\n\n' +
+      '安全说明：该密码会用 AES-256-GCM 加密后存到服务器（密钥在 data/conf/warmup/secret.key，不进仓库），\n' +
+      '仅用于读取该账号的收件箱以核对进箱/垃圾箱、以及代替它回信。'
+    );
+  });
+
+  // 重新验证收件人 IMAP 凭据
+  $(document).on('click', '.ov_wu_rc_verify', function () {
+    var b = $(this).prop('disabled', true).text('验证中…');
+    post({ action: 'verify_recipient', id: $(this).data('id') }, WU)
+      .done(function (d) {
+        notice((d && d.message) || (d && d.ok ? '验证通过' : '验证失败'), !(d && d.ok));
+        if (d && d.ok) { load(); }
+      })
+      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); })
+      .always(function () { b.prop('disabled', false).text('验证 IMAP'); });
+  });
+
+  // 更新收件人密码
+  $(document).on('click', '.ov_wu_rc_edit', function () {
+    var id = $(this).data('id'), email = $(this).data('email');
+    var pw = window.prompt('为 ' + email + ' 设置新的应用专用密码（留空取消）：', '');
+    if (!pw) { return; }
+    post({ action: 'edit_recipient', id: id, secret: pw }, WU)
+      .done(function (d) {
+        if (d && d.ok) {
+          notice('密码已更新，正在重新验证…');
+          post({ action: 'verify_recipient', id: id }, WU).always(function () { load(); });
+        } else { notice((d && d.message) || '更新失败', true); }
+      })
+      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); });
+  });
+
+  // 互动开关
+  $(document).on('click', '.ov_wu_rc_ar', function () {
+    var v = parseInt($(this).data('v'), 10);
+    act(WU, { action: 'edit_recipient', id: $(this).data('id'), auto_reply: v },
+        v ? '已开启自动回复' : '已关闭自动回复');
+  });
+  $(document).on('click', '.ov_wu_rc_rs', function () {
+    var v = parseInt($(this).data('v'), 10);
+    act(WU, { action: 'edit_recipient', id: $(this).data('id'), rescue_spam: v },
+        v ? '已开启垃圾箱救援' : '已关闭垃圾箱救援');
   });
 });

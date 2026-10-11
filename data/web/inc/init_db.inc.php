@@ -232,7 +232,25 @@ function init_db_schema()
           "email" => "VARCHAR(255) NOT NULL",
           "label" => "VARCHAR(128) NOT NULL DEFAULT ''",
           "active" => "TINYINT(1) NOT NULL DEFAULT '1'",
-          "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)"
+          "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
+          // ---- 以下为「收件人账号化」扩展：把收件人从"一个地址"升级成
+          //      "一个可登录的真实邮箱"，才能判断进箱/垃圾箱并代替对方互动 ----
+          "imap_host" => "VARCHAR(128) NOT NULL DEFAULT 'imap.gmail.com'",
+          "imap_port" => "INT NOT NULL DEFAULT '993'",
+          "smtp_host" => "VARCHAR(128) NOT NULL DEFAULT 'smtp.gmail.com'",
+          "smtp_port" => "INT NOT NULL DEFAULT '465'",
+          // 应用专用密码，**可逆加密**存放（密钥在 data/conf/warmup/secret.key）。
+          // 邮箱登录密码是 bcrypt 不可逆，那是另一回事，别混用。
+          "secret_enc" => "TEXT NULL DEFAULT NULL",
+          "verify_status" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          "last_verify" => "DATETIME(0) NULL DEFAULT NULL",
+          "last_check" => "DATETIME(0) NULL DEFAULT NULL",
+          "inbox_count" => "INT NOT NULL DEFAULT '0'",
+          "spam_count" => "INT NOT NULL DEFAULT '0'",
+          "reply_count" => "INT NOT NULL DEFAULT '0'",
+          // 是否让本模块代它回复 / 把垃圾箱里的邮件救回收件箱
+          "auto_reply" => "TINYINT(1) NOT NULL DEFAULT '0'",
+          "rescue_spam" => "TINYINT(1) NOT NULL DEFAULT '0'"
         ),
         "keys" => array(
           "primary" => array(
@@ -240,6 +258,34 @@ function init_db_schema()
           ),
           "key" => array(
             "email" => array("email")
+          )
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "warmup_messages" => array(
+        "cols" => array(
+          "id" => "INT NOT NULL AUTO_INCREMENT",
+          "plan_id" => "INT NOT NULL",
+          "recipient_id" => "INT NOT NULL DEFAULT '0'",
+          "recipient" => "VARCHAR(255) NOT NULL",
+          "message_id" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          "subject" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          "sent_at" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
+          "send_ok" => "TINYINT(1) NOT NULL DEFAULT '1'",
+          "fail_reason" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          // inbox / spam / missing / unknown —— 「垃圾箱率」的唯一可信来源
+          "result" => "VARCHAR(16) NOT NULL DEFAULT 'unknown'",
+          "checked_at" => "DATETIME(0) NULL DEFAULT NULL",
+          "replied_at" => "DATETIME(0) NULL DEFAULT NULL"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("id")
+          ),
+          "key" => array(
+            "plan_id" => array("plan_id"),
+            "message_id" => array("message_id"),
+            "result" => array("result")
           )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"

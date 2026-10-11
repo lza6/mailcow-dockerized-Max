@@ -7,6 +7,8 @@
 
 require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/prerequisites.inc.php';
 require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.warmup.inc.php';
+require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.secretbox.inc.php';
+require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/functions.warmup_ext.inc.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -25,8 +27,41 @@ $action = isset($_REQUEST['action']) ? (string)$_REQUEST['action'] : '';
 $write_actions = array(
   'add_plan', 'edit_plan', 'delete_plan', 'set_status', 'run_now',
   'add_recipient', 'delete_recipient', 'toggle_recipient',
+  'verify_recipient', 'edit_recipient', 'check_deliveries', 'run_interact',
+  'add_plans_for_all',
 );
 $is_write = in_array($action, $write_actions, true);
+
+/*
+ * 写动作显式校验「本次请求确实过了框架的 CSRF 校验」。
+ *
+ * 与 ajax/overview.php 同一套判据，原因也一样：
+ *   sessions.inc.php 在 CSRF **失败**时只清空 $_POST、不中止请求。
+ *   「参数被清空 → 动作自然失效」对**带参**动作成立，但 check_deliveries /
+ *   run_interact 这类**无参**动作不受影响，会被伪造请求直接触发（要连 IMAP、
+ *   要发信，代价很高）。
+ *
+ * 判据为什么不能是比对 token 值：框架在**校验通过后**会 unset
+ * $_POST['csrf_token'] 并轮换会话 token，此刻比对必然不等 → 合法请求全 403。
+ * 只能用「$_POST 是否被清空」——框架只在失败时清空它。
+ */
+if ($is_write) {
+  if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'POST') {
+    http_response_code(405);
+    echo json_encode(array('ok' => false, 'message' => '该动作仅接受 POST'), JSON_UNESCAPED_UNICODE);
+    exit;
+  }
+  if (!isset($_REQUEST['csrf_token']) || (string)$_REQUEST['csrf_token'] === '') {
+    http_response_code(403);
+    echo json_encode(array('ok' => false, 'message' => '缺少 CSRF token'), JSON_UNESCAPED_UNICODE);
+    exit;
+  }
+  if (empty($_POST)) {
+    http_response_code(403);
+    echo json_encode(array('ok' => false, 'message' => 'CSRF 校验失败，请刷新页面后重试'), JSON_UNESCAPED_UNICODE);
+    exit;
+  }
+}
 
 if ($is_api_session && $is_write) {
   http_response_code(403);
@@ -101,6 +136,7 @@ try {
 
       $out = array();
       foreach ($plans as $p) {
+        $next = warmup_next_send($p);
         $out[] = array(
           'id'           => (int)$p['id'],
           'domain'       => $p['domain'],
@@ -118,16 +154,33 @@ try {
           'sent_all'     => (int)$p['sent_all'],
           'fail_all'     => (int)$p['fail_all'],
           'last_run'     => $p['last_run'],
+          // 「下一封什么时候发」——与调度器同一套算法算出来，不是另算一遍
+          'next_at'      => $next['at'],
+          'next_state'   => $next['state'],
         );
       }
 
       $rcOut = array();
       foreach ($recipients as $r) {
+        // 只给「是否已配置密码」，**绝不把 secret_enc 吐出去**
         $rcOut[] = array(
-          'id'     => (int)$r['id'],
-          'email'  => $r['email'],
-          'label'  => $r['label'],
-          'active' => (int)$r['active'],
+          'id'            => (int)$r['id'],
+          'email'         => $r['email'],
+          'label'         => $r['label'],
+          'active'        => (int)$r['active'],
+          'imap_host'     => (string)$r['imap_host'],
+          'imap_port'     => (int)$r['imap_port'],
+          'smtp_host'     => (string)$r['smtp_host'],
+          'smtp_port'     => (int)$r['smtp_port'],
+          'has_secret'    => !empty($r['secret_enc']),
+          'verify_status' => (string)$r['verify_status'],
+          'last_verify'   => (string)$r['last_verify'],
+          'last_check'    => (string)$r['last_check'],
+          'inbox_count'   => (int)$r['inbox_count'],
+          'spam_count'    => (int)$r['spam_count'],
+          'reply_count'   => (int)$r['reply_count'],
+          'auto_reply'    => (int)$r['auto_reply'],
+          'rescue_spam'   => (int)$r['rescue_spam'],
         );
       }
 
@@ -157,6 +210,9 @@ try {
         'max_per_run'    => WARMUP_MAX_PER_RUN,
         'window'         => WARMUP_WINDOW_START_HOUR . ':00 - ' . WARMUP_WINDOW_END_HOUR . ':00',
         'server_time'    => date('Y-m-d H:i:s'),
+        // 真实进箱/垃圾箱统计（来自收件人邮箱的实际核对，不是估算）
+        'stats'          => warmup_delivery_stats($pdo, 30),
+        'secretbox'      => sb_available(),
       ));
     }
 
@@ -239,21 +295,165 @@ try {
       wu_json(array('ok' => true));
     }
 
-    // ============ 收件人池 ============
+    // ============ 收件人池：加账号（可带 IMAP/SMTP 凭据，一键验证）============
     case 'add_recipient': {
       $email = wu_post('email');
       $label = mb_substr(wu_post('label'), 0, 128);
       if (!wu_valid_email($email)) {
-        wu_json(array('ok' => false, 'message' => 'invalid email'));
+        wu_json(array('ok' => false, 'message' => '邮箱格式不合法'));
       }
       $stmt = $pdo->prepare("SELECT COUNT(*) FROM `warmup_recipients` WHERE `email` = :e");
       $stmt->execute(array(':e' => $email));
       if ((int)$stmt->fetchColumn() > 0) {
-        wu_json(array('ok' => false, 'message' => 'recipient already exists'));
+        wu_json(array('ok' => false, 'message' => '该收件人已存在'));
       }
-      $stmt = $pdo->prepare("INSERT INTO `warmup_recipients` (`email`, `label`) VALUES (:e, :l)");
-      $stmt->execute(array(':e' => $email, ':l' => $label));
-      wu_json(array('ok' => true, 'id' => (int)$pdo->lastInsertId()));
+
+      $imapHost = wwe_valid_host(wu_post('imap_host', 'imap.gmail.com'));
+      $smtpHost = wwe_valid_host(wu_post('smtp_host', 'smtp.gmail.com'));
+      if ($imapHost === '' || $smtpHost === '') {
+        wu_json(array('ok' => false, 'message' => 'IMAP/SMTP 主机名不合法'));
+      }
+      $imapPort = wwe_valid_port(wu_post('imap_port', '993'), 993);
+      $smtpPort = wwe_valid_port(wu_post('smtp_port', '465'), 465);
+
+      // 应用专用密码明文只在这里出现一次，立刻加密；库里存的是密文
+      $secret = (string)(isset($_POST['secret']) ? $_POST['secret'] : '');
+      $enc    = '';
+      if ($secret !== '') {
+        if (!sb_available()) {
+          wu_json(array('ok' => false, 'message' => '凭据保管箱不可用（openssl 扩展缺失或密钥目录不可写）'));
+        }
+        $enc = sb_encrypt($secret);
+        if ($enc === '') { wu_json(array('ok' => false, 'message' => '凭据加密失败')); }
+      }
+
+      $stmt = $pdo->prepare("INSERT INTO `warmup_recipients`
+          (`email`,`label`,`imap_host`,`imap_port`,`smtp_host`,`smtp_port`,`secret_enc`,
+           `auto_reply`,`rescue_spam`)
+          VALUES (:e,:l,:ih,:ip,:sh,:sp,:sec,:ar,:rs)");
+      $stmt->execute(array(
+        ':e' => $email, ':l' => $label,
+        ':ih' => $imapHost, ':ip' => $imapPort, ':sh' => $smtpHost, ':sp' => $smtpPort,
+        ':sec' => $enc,
+        ':ar' => wu_int('auto_reply', 0) ? 1 : 0,
+        ':rs' => wu_int('rescue_spam', 0) ? 1 : 0,
+      ));
+      $id = (int)$pdo->lastInsertId();
+
+      // 带凭据就顺手验一次 —— 让管理员立刻知道密码对不对，而不是等养号跑起来才发现
+      $verify = null;
+      if ($enc !== '') {
+        $cred = warmup_recipient_cred($pdo, $id);
+        if ($cred) {
+          list($conn, $err) = wwe_connect($cred, 'INBOX');
+          if ($conn !== false) {
+            $folders = @imap_getmailboxes($conn, '', '*');
+            $n = is_array($folders) ? count($folders) : 0;
+            @imap_close($conn);
+            $verify = array('ok' => true, 'message' => 'IMAP 验证通过，可见 ' . $n . ' 个文件夹');
+          } else {
+            $verify = array('ok' => false, 'message' => 'IMAP 验证失败：' . $err);
+          }
+          $pdo->prepare("UPDATE `warmup_recipients`
+                            SET `verify_status` = :s, `last_verify` = NOW(0) WHERE `id` = :i")
+              ->execute(array(':s' => mb_substr($verify['message'], 0, 255), ':i' => $id));
+        }
+      }
+      wu_json(array('ok' => true, 'id' => $id, 'verify' => $verify));
+    }
+
+    // ============ 收件人：重新验证 IMAP 凭据 ============
+    case 'verify_recipient': {
+      $id = wu_int('id');
+      if ($id <= 0) { wu_json(array('ok' => false, 'message' => 'invalid id')); }
+      $cred = warmup_recipient_cred($pdo, $id);
+      if (!$cred) { wu_json(array('ok' => false, 'message' => '该收件人未配置应用专用密码')); }
+      list($conn, $err) = wwe_connect($cred, 'INBOX');
+      if ($conn === false) {
+        $pdo->prepare("UPDATE `warmup_recipients` SET `verify_status` = :s, `last_verify` = NOW(0)
+                        WHERE `id` = :i")->execute(array(':s' => mb_substr('失败: ' . $err, 0, 255), ':i' => $id));
+        wu_json(array('ok' => false, 'message' => 'IMAP 验证失败：' . $err));
+      }
+      $folders = @imap_getmailboxes($conn, '', '*');
+      $n = is_array($folders) ? count($folders) : 0;
+      $spam = wwe_spam_folder($conn);
+      @imap_close($conn);
+      $msg = 'IMAP 验证通过，可见 ' . $n . ' 个文件夹' . ($spam !== '' ? ('；垃圾箱=' . $spam) : '；未找到垃圾箱文件夹');
+      $pdo->prepare("UPDATE `warmup_recipients` SET `verify_status` = :s, `last_verify` = NOW(0)
+                      WHERE `id` = :i")->execute(array(':s' => mb_substr($msg, 0, 255), ':i' => $id));
+      wu_json(array('ok' => true, 'message' => $msg, 'spam_folder' => $spam));
+    }
+
+    // ============ 收件人：更新凭据 / 互动开关 ============
+    case 'edit_recipient': {
+      $id = wu_int('id');
+      if ($id <= 0) { wu_json(array('ok' => false, 'message' => 'invalid id')); }
+      $sets = array(); $args = array(':i' => $id);
+      if (isset($_POST['label'])) { $sets[] = '`label` = :l'; $args[':l'] = mb_substr(wu_post('label'), 0, 128); }
+      if (isset($_POST['auto_reply']))   { $sets[] = '`auto_reply` = :ar';   $args[':ar'] = wu_int('auto_reply') ? 1 : 0; }
+      if (isset($_POST['rescue_spam']))  { $sets[] = '`rescue_spam` = :rs';  $args[':rs'] = wu_int('rescue_spam') ? 1 : 0; }
+      if (isset($_POST['active']))       { $sets[] = '`active` = :a';        $args[':a'] = wu_int('active') ? 1 : 0; }
+      if (isset($_POST['secret']) && (string)$_POST['secret'] !== '') {
+        if (!sb_available()) { wu_json(array('ok' => false, 'message' => '凭据保管箱不可用')); }
+        $enc = sb_encrypt((string)$_POST['secret']);
+        if ($enc === '') { wu_json(array('ok' => false, 'message' => '凭据加密失败')); }
+        $sets[] = '`secret_enc` = :sec'; $args[':sec'] = $enc;
+      }
+      if (empty($sets)) { wu_json(array('ok' => false, 'message' => '没有要修改的内容')); }
+      $pdo->prepare("UPDATE `warmup_recipients` SET " . implode(', ', $sets) . " WHERE `id` = :i")
+          ->execute($args);
+      wu_json(array('ok' => true));
+    }
+
+    // ============ 一键：为所有「还没有计划的启用邮箱」建计划 ============
+    // 之前必须一个个手点；而"没绑 Resend 的域也要养"这类需求一次就是十几个。
+    case 'add_plans_for_all': {
+      $start = max(1, min(50, wu_int('start_count', 2)));
+      $step  = max(0, min(20, wu_int('step', 1)));
+      $max   = max($start, min(200, wu_int('max_count', 20)));
+      $days  = max(1, min(365, wu_int('total_days', 30)));
+
+      // 已有未结束计划的发件人不重复建
+      $busy = array();
+      foreach ($pdo->query("SELECT `sender` FROM `warmup_plans`
+                             WHERE `status` IN ('active','paused')")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        $busy[strtolower($r['sender'])] = true;
+      }
+      $rows = $pdo->query("SELECT `username` FROM `mailbox`
+                            WHERE `active` = 1 ORDER BY `username` ASC")->fetchAll(PDO::FETCH_ASSOC);
+      $created = 0; $skipped = array();
+      $ins = $pdo->prepare("INSERT INTO `warmup_plans`
+          (`domain`,`sender`,`start_count`,`step`,`max_count`,`total_days`,`status`,`started_on`)
+          VALUES (:d,:s,:sc,:st,:mx,:td,'active',CURDATE())");
+      foreach ($rows as $r) {
+        $sender = (string)$r['username'];
+        if (isset($busy[strtolower($sender)])) { $skipped[] = $sender . '（已有未结束计划）'; continue; }
+        $at = strrpos($sender, '@');
+        if ($at === false) { $skipped[] = $sender . '（地址异常）'; continue; }
+        $domain = substr($sender, $at + 1);
+        if (!wu_valid_domain($domain)) { $skipped[] = $sender . '（域名异常）'; continue; }
+        try {
+          $ins->execute(array(':d' => $domain, ':s' => $sender, ':sc' => $start,
+                              ':st' => $step, ':mx' => $max, ':td' => $days));
+          $created++;
+          $busy[strtolower($sender)] = true;
+        } catch (Exception $e) {
+          $skipped[] = $sender . '（' . mb_substr($e->getMessage(), 0, 80) . '）';
+        }
+      }
+      wu_json(array('ok' => true, 'created' => $created, 'skipped' => $skipped));
+    }
+
+    // ============ 手动触发：投递判定（去收件人邮箱看进了收件箱还是垃圾箱）============
+    case 'check_deliveries': {
+      $r = warmup_check_deliveries($pdo, 30);
+      wu_json(array('ok' => true, 'result' => $r));
+    }
+
+    // ============ 手动触发：互动（垃圾箱救援 + 自动回复）============
+    case 'run_interact': {
+      $r = warmup_interact($pdo, 10);
+      wu_json(array('ok' => true, 'result' => $r));
     }
 
     case 'delete_recipient': {
