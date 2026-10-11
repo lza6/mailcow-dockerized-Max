@@ -93,12 +93,13 @@
 
 ---
 
-## 五、本仓库特有的三个"坑"（已沉淀为记忆 + 脚本）
+## 五、本仓库特有的四个"坑"（已沉淀为记忆 + 脚本）
 
 | 坑 | 症状 | 防护 |
 |---|---|---|
 | mailcow 的 `footer.js` 会 `$('tbody').filter(空).remove()` | 用 JS 填表的页面**整表永远空白**，控制台无报错，响应体里元素 ID 齐全 | 模板放占位行 + JS `body()` 兜底；`helper-scripts/check_empty_tbody.cjs` |
 | CSRF 语义反直觉：通过后 unset 字段并轮换，失败才清空 `$_POST` | 直接比对 token → **所有合法写请求 403** | 判据用「`$_POST` 是否被清空」；无参副作用动作必须显式校验 |
+| `init_db_schema()` 是**版本门控**的 | 在 `$tables` 里加了新表但没改 `$db_version` → **表永远建不出来，且不报错**（业务侧静默写不进数据），实测踩过 `warmup_messages` | 新增/改表定义后**必须**提升 `$db_version`；部署后用 `SHOW TABLES LIKE` 逐个复核 |
 | 远端 `main` 与本地 `master` **无共同祖先** | 直接 push 被拒；force push 会丢历史与 tag | `fetch max/main` → cherry-pick → 快进推送 |
 
 ---
