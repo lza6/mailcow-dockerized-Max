@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>变更报告 · mailcow-dockerized-Max · 2026-10-11</title>
+<style>
+  :root{
+    --paper:#fbf9f5; --ink:#1c1b19; --muted:#6b675f; --line:#e2ddd2;
+    --accent:#9a3412; --accent-soft:#fdeee6;
+    --ok:#15803d; --ok-bg:#eefbf2; --bad:#b91c1c; --bad-bg:#fdecec;
+    --code-bg:#f4f1ea;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font:16px/1.75 ui-serif,Georgia,"Songti SC","Noto Serif CJK SC",serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:860px;margin:0 auto;padding:56px 24px 120px}
+  header{border-bottom:3px double var(--line);padding-bottom:28px;margin-bottom:40px}
+  .kicker{
+    font:600 12px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--accent);margin-bottom:14px
+  }
+  h1{font-size:clamp(28px,4.5vw,42px);line-height:1.15;margin:0 0 14px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:15px}
+  h2{
+    font-size:23px;margin:56px 0 6px;letter-spacing:-.01em;
+    padding-left:14px;border-left:4px solid var(--accent);
+  }
+  h3{font-size:17px;margin:30px 0 8px;font-family:ui-sans-serif,system-ui,sans-serif}
+  p{margin:12px 0}
+  .lede{font-size:18px;color:#38352f}
+  code,pre{font-family:ui-monospace,SFMono-Regular,"Cascadia Mono",Menlo,monospace;font-size:13px}
+  code{background:var(--code-bg);padding:1.5px 5px;border-radius:3px}
+  pre{
+    background:var(--code-bg);border:1px solid var(--line);border-radius:6px;
+    padding:14px 16px;overflow:auto;line-height:1.6
+  }
+  .card{
+    border:1px solid var(--line);border-radius:8px;padding:18px 20px;margin:18px 0;background:#fff
+  }
+  .card.warn{background:var(--accent-soft);border-color:#f2cdbb}
+  .card.good{background:var(--ok-bg);border-color:#c7ebd5}
+  .card h3{margin-top:0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;
+        font-family:ui-sans-serif,system-ui,sans-serif}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-weight:600;color:var(--muted);font-size:12px;letter-spacing:.04em;text-transform:uppercase}
+  .tag{
+    display:inline-block;font:600 11px/1 ui-sans-serif,system-ui,sans-serif;
+    padding:3px 7px;border-radius:99px;letter-spacing:.03em
+  }
+  .tag.done{background:var(--ok-bg);color:var(--ok)}
+  .tag.todo{background:#fff5e6;color:#92400e}
+  .tag.blocked{background:var(--bad-bg);color:var(--bad)}
+  ul{padding-left:22px}
+  li{margin:6px 0}
+  .quiz{margin-top:64px;border-top:3px double var(--line);padding-top:32px}
+  .q{border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin:14px 0;background:#fff}
+  .q .stem{font-weight:600;margin-bottom:10px}
+  .q label{display:block;padding:8px 10px;border-radius:6px;cursor:pointer;margin:4px 0;
+           font-family:ui-sans-serif,system-ui,sans-serif;font-size:14px}
+  .q label:hover{background:#f7f4ee}
+  .q label.right{background:var(--ok-bg);color:var(--ok);font-weight:600}
+  .q label.wrong{background:var(--bad-bg);color:var(--bad)}
+  .q .why{display:none;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);
+          font-size:13.5px;color:var(--muted)}
+  .q .why.show{display:block}
+  button{
+    font:600 14px/1 ui-sans-serif,system-ui,sans-serif;padding:11px 20px;border-radius:6px;
+    border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer
+  }
+  button.ghost{background:transparent;color:var(--accent)}
+  #verdict{margin-top:18px;font-weight:700;font-size:17px;display:none;padding:14px 18px;border-radius:8px}
+  #verdict.pass{display:block;background:var(--ok-bg);color:var(--ok)}
+  #verdict.fail{display:block;background:var(--bad-bg);color:var(--bad)}
+  .foot{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);
+        color:var(--muted);font-size:13px}
+  hr{border:0;border-top:1px solid var(--line);margin:36px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">变更报告 · 2026-10-11</div>
+  <h1>把「看不见」变成「看得见」：<br>一次真实根因排查与养号闭环</h1>
+  <p class="sub">
+    仓库 <code>lza6/mailcow-dockerized-Max</code> · 分支 <code>main</code> ·
+    远端 <code>1f5693550</code> · Release <code>v2026.07b-cn.7</code><br>
+    生产 <code>mail.pony-it.com</code> · 本文档结束时已部署并验证
+  </p>
+</header>
+
+<h2>一、上下文：我们当时面对什么</h2>
+
+<p class="lede">
+  这不是一次「加个功能」的迭代。它起源于三个**看起来无关、其实同源**的现象。
+</p>
+
+<h3>现象 1：后台页面「有 16 个域名，但列表全空」</h3>
+<p>
+  页面顶部的统计卡正常显示「域名 16 / 邮箱 16」，但下面所有表格一行都不显示。
+  养号标签页同样空白。<strong>浏览器控制台没有任何报错</strong>，
+  服务端返回的 HTML 里元素 ID 也一应俱全。
+</p>
+
+<h3>现象 2：点「进 Webmail」进的是管理员自己的邮箱</h3>
+<p>
+  从某个邮箱行点进去，打开的是 SOGo，但登录身份是<strong>当前登录的管理员</strong>，
+  不是那个邮箱。
+</p>
+
+<h3>现象 3：养号是个黑匣子</h3>
+<p>
+  只能看到「今天发了几封」。发给了谁、落到收件箱还是垃圾箱、下一封什么时候发、
+  对方有没有回复——全都看不到。而 Gmail 官方文档写得很清楚：按域记信誉、
+  量要慢慢涨、别爆发、<strong>要收件人主动互动</strong>。
+</p>
+
+<div class="card warn">
+  <h3>关键判断：这三个现象里，只有一个是"配置问题"</h3>
+  <p>
+    现象 2 是<strong>我用错了链接</strong>（这是真 bug，但一眼可查）；
+    现象 1 和 3 表面无关，实际指向同一件事：<strong>整个系统缺少"可观测"这一层</strong>。
+    没有可观测性，连"页面到底渲染了什么"都只能靠猜——而我就是这么猜错的。
+  </p>
+</div>
+
+<h2>二、直觉：为什么第一反应是错的</h2>
+
+<p>
+  面对现象 1，我的第一反应是「数据没传到前端」。于是我去查服务端返回的 HTML：
+  元素在；再查内联 JSON：16 个域名都在。于是判定「服务端没问题」。
+</p>
+
+<p><strong>这个判断错在哪里？</strong>错在把「服务端返回了什么」当成了「浏览器看到了什么」。
+中间还有一整层我没看：<strong>前端 JS 在页面加载后到底对 DOM 做了什么</strong>。</p>
+
+<div class="card">
+  <h3>真正的定位方式：在被怀疑的地方装上探针</h3>
+  <p>与其继续读代码猜，不如把<strong>生产真实的页面 HTML + 真实 JS bundle</strong>
+  放进 jsdom 执行，然后钩住 DOM 写操作打印调用栈：</p>
+<pre>beforeParse(window) {
+  const rc = window.Node.prototype.removeChild;
+  window.Node.prototype.removeChild = function (child) {
+    if (child.tagName === 'TBODY') console.log(new Error().stack);
+    return rc.apply(this, arguments);
+  };
+}</pre>
+  <p>调用栈直接落到了 bundle 第 2704 行——<strong>mailcow 自己的 footer.js</strong>：</p>
+<pre>$('tbody').filter(function(){ return $(this).children().length &lt; 1; }).remove();</pre>
+  <p>
+    它在<strong>页面解析阶段</strong>就把所有空的 <code>&lt;tbody&gt;</code> 删掉了。
+    而我们的设计恰好是「tbody 留空、由 JS 填充」——容器先被删，JS 再写就找不到地方。
+    统计卡是 <code>&lt;div&gt;</code>，不受这条规则影响，于是出现了那个迷惑性的组合。
+  </p>
+</div>
+
+<p><strong>直觉修正</strong>：验证一个前端功能，必须验证「渲染后的结果」，
+而不是「响应体里有没有东西」。这两者之间隔着一整个 JS 运行时。</p>
+
+<h2>三、做了什么</h2>
+
+<h3>3.1 修掉真 bug：列表全空</h3>
+<table>
+  <tr><th>动作</th><th>说明</th></tr>
+  <tr><td>模板加占位行</td><td>每个 <code>&lt;tbody&gt;</code> 放一行「正在加载…」，非空 → 不会被那条规则删；JS 渲染时整体替换</td></tr>
+  <tr><td>JS 兜底重建</td><td><code>body(sel, tableSel)</code>：万一容器还是没了，就按 <code>&lt;table&gt;</code> 重建一个 tbody</td></tr>
+  <tr><td>回归防护</td><td><code>helper-scripts/check_empty_tbody.cjs</code> 扫描全部 83 个模板，发现空 tbody 即失败</td></tr>
+  <tr><td>同类排查</td><td>养号标签页有<b>同样的</b> 3 个空 tbody，一并修；投递追踪页作者当时写对了（已放占位行）</td></tr>
+</table>
+
+<h3>3.2 修掉真 bug：Webmail 进错账号</h3>
+<p>
+  SOGo 的登录态由 mailcow 会话驱动（nginx <code>auth_request</code> →
+  <code>/sogo-auth-verify</code> → <code>sogo-auth.php</code>，
+  通过 <code>x-webobjects-remote-user</code> 传当前登录用户）。
+  所以点 <code>/SOGo/</code> 进去的<strong>永远是当前登录的那个人</strong>。
+</p>
+<p>
+  mailcow 官方的做法是 <code>/sogo-auth.php?login=&lt;邮箱&gt;</code>（见官方
+  <code>mailbox.js</code>），它会把会话切换到目标邮箱（dual-login）。
+  该入口需要 <code>mailcow.conf</code> 里 <code>ALLOW_ADMIN_EMAIL_LOGIN=y</code>——
+  生产上原本是 <code>n</code>，已开启并实测通过。
+</p>
+
+<h3>3.3 打开养号黑匣子</h3>
+<table>
+  <tr><th>能力</th><th>实现要点</th></tr>
+  <tr><td>逐封留痕</td><td>新表 <code>warmup_messages</code>：收件人 / <b>Message-ID</b> / 主题 / 发送结果 / 真实落点 / 是否被回复</td></tr>
+  <tr><td>真实进箱判定</td><td>cron 每 15 分钟用收件人账号的 IMAP，按 Message-ID 到它自己的收件箱与垃圾箱反查</td></tr>
+  <tr><td>垃圾箱定位</td><td>按 IMAP 的 <code>\Spam</code> 属性找文件夹，<b>不硬编码 <code>[Gmail]/Spam</code></b>（Gmail 文件夹名是本地化的）</td></tr>
+  <tr><td>互动</td><td>垃圾箱救援（标记非垃圾 + 移回收件箱）＋ 代收件人回信（SMTP）</td></tr>
+  <tr><td>凭据保管箱</td><td>应用专用密码用 AES-256-GCM 可逆加密；密钥 0600、不在 web 目录、已 gitignore</td></tr>
+  <tr><td>下一封时刻</td><td><code>warmup_next_send()</code> 与调度器<b>共用同一套算法</b>，避免两边漂移</td></tr>
+  <tr><td>配额可编辑</td><td>界面直接改「起量 / 日增 / 上限」，当天配额立即变化</td></tr>
+  <tr><td>一键建计划</td><td>为所有未养号的邮箱批量建计划（含没绑 Resend 的域）</td></tr>
+</table>
+
+<h3>3.4 顺手做的两件事</h3>
+<ul>
+  <li><strong>按钮审计</strong>：47 个控件全部检查是否真有处理器，抓出并修好了 1 个假按钮（<code>ov_pool_reveal</code>）。</li>
+  <li><strong>同源漏洞加固</strong>：新增的 <code>check_deliveries</code> / <code>run_interact</code>
+  是<b>无参动作</b>，正好落在「CSRF 失败 → 清空 <code>$_POST</code> → 动作自然失效」
+  这条隐式约定的盲区，按同一语义加固。</li>
+</ul>
+
+<h2>四、踩过的坑（这部分最值钱）</h2>
+
+<table>
+  <tr><th>坑</th><th>症状</th><th>教训</th></tr>
+  <tr>
+    <td>空 tbody 被 mailcow 删掉</td>
+    <td>表永远空白、无报错、响应体正常</td>
+    <td>前端功能必须验证<b>渲染结果</b>，不是响应体</td>
+  </tr>
+  <tr>
+    <td>CSRF 语义反直觉</td>
+    <td>框架校验<b>通过后</b>会 unset 掉 <code>$_POST['csrf_token']</code> 并轮换会话 token；失败才清空 <code>$_POST</code>。<br>直接比对 token → <b>所有合法写请求 403</b></td>
+    <td>判据只能用「<code>$_POST</code> 是否被清空」</td>
+  </tr>
+  <tr>
+    <td>测试脚本伪装成产品 bug</td>
+    <td>管道子 shell 吞掉轮换后的 token → 报「邮箱地址不合法」，让人以为是校验函数有 bug</td>
+    <td>写操作的"参数不合法"报错，先怀疑 CSRF 失效</td>
+  </tr>
+  <tr>
+    <td>远端与本地无共同祖先</td>
+    <td>直接 push 被拒</td>
+    <td>必须 <code>fetch max/main</code> → cherry-pick → 快进推送，<b>绝不能 force push</b></td>
+  </tr>
+</table>
+
+<h2>五、验证证据</h2>
+
+<table>
+  <tr><th>项</th><th>结果</th></tr>
+  <tr><td>页面渲染（jsdom 真实 DOM）</td><td>域 <b>16 行</b> / 邮箱 <b>16 行</b> / 池 1 / 绑定 3 / 计划 1 / 收件人 1 / 汇总 2 / 审计 30</td></tr>
+  <tr><td>凭据保管箱</td><td>加密→解密往返正确；<b>篡改 4 字节后解密返回空串</b>（GCM 认证生效）并记日志</td></tr>
+  <tr><td>按钮审计</td><td>47 个控件<b>全部有处理器</b></td></tr>
+  <tr><td>空 tbody 检查</td><td>83 个模板全部通过</td></tr>
+  <tr><td>数据库迁移</td><td><code>warmup_recipients</code> 新列 4/4；<code>warmup_messages</code> 已建</td></tr>
+  <tr><td>CSRF 回归</td><td>伪造 → 403；缺 token → 403；GET → 405；合法 → 成功</td></tr>
+  <tr><td>并发写</td><td>600 次 <b>0 失败 0 死锁</b></td></tr>
+  <tr><td>只读压测</td><td>1950 请求 <b>0 失败</b>，峰值 ~123 RPS</td></tr>
+</table>
+
+<h2>六、还没做的（诚实清单）</h2>
+<table>
+  <tr><th>项</th><th>状态</th><th>原因</th></tr>
+  <tr><td>进箱率/垃圾箱率真正出数</td><td><span class="tag blocked">blocked</span></td><td>需要收件人账号的 <b>Google 应用专用密码</b>（用户操作）</td></tr>
+  <tr><td>显示邮箱登录密码明文</td><td><span class="tag blocked">blocked</span></td><td>bcrypt 单向哈希，<b>数学上不可逆</b>，任何系统都做不到</td></tr>
+  <tr><td>邮箱表「最近一封邮件时间 / 今日邮件数」</td><td><span class="tag todo">todo</span></td><td><code>quota2</code> 无此字段，需新数据来源</td></tr>
+  <tr><td>邮箱级改绑 re 账号</td><td><span class="tag todo">todo</span></td><td>mailcow 中继是<b>域级</b>的，邮箱级覆盖需要新表</td></tr>
+  <tr><td>Google Postmaster 信誉分</td><td><span class="tag blocked">blocked</span></td><td>需用户本人 Google 账号 OAuth 授权</td></tr>
+</table>
+
+<!-- =================== 测验 =================== -->
+<section class="quiz">
+  <div class="kicker">必须通过</div>
+  <h2 style="margin-top:6px">变更测验</h2>
+  <p class="sub">全部答对才算通过。选错会有解释。</p>
+
+  <div class="q" data-a="b">
+    <div class="stem">1. 后台页面的表格全部空白，但响应体 HTML 里元素 ID 齐全、内联 JSON 有 16 个域名。最可能的原因是什么？</div>
+    <label><input type="radio" name="q1" value="a"> 服务端数据没查到，需要加索引</label>
+    <label><input type="radio" name="q1" value="b"> 浏览器端有 JS 在解析阶段删掉了 tbody（mailcow 会移除空 tbody）</label>
+    <label><input type="radio" name="q1" value="c"> PHP 报错了但被吞掉</label>
+    <div class="why">mailcow 的 footer.js 里有 <code>$('tbody').filter(空).remove()</code>，在解析阶段就执行。
+    容器被删后 JS 再 <code>.html()</code> 就写不进去；统计卡是 div 所以还在——这正是「有 16 个域名但列表全空」的由来。</div>
+  </div>
+
+  <div class="q" data-a="c">
+    <div class="stem">2. 给写动作加「显式 CSRF 校验」时，为什么<strong>不能</strong>直接比对 <code>$_POST['csrf_token']</code> 和会话里的 token？</div>
+    <label><input type="radio" name="q2" value="a"> 因为 token 是加密的</label>
+    <label><input type="radio" name="q2" value="b"> 因为 $_POST 里根本没有 csrf_token</label>
+    <label><input type="radio" name="q2" value="c"> 因为框架在<strong>校验通过后</strong>就 unset 掉该字段并把会话 token 换成新值，此刻比对必然不等 → 合法请求全 403</label>
+    <div class="why">改用「$_POST 是否被清空」作判据：框架只在<b>失败</b>时清空它。这个错我实际犯过，症状是"所有写操作 403"。</div>
+  </div>
+
+  <div class="q" data-a="a">
+    <div class="stem">3. 「点进某个邮箱的 Webmail，进去的却是管理员自己」——正确修法是什么？</div>
+    <label><input type="radio" name="q3" value="a"> 改用 <code>/sogo-auth.php?login=&lt;邮箱&gt;</code>（mailcow 官方入口，需 ALLOW_ADMIN_EMAIL_LOGIN=y）</label>
+    <label><input type="radio" name="q3" value="b"> 把 /SOGo/ 换成 /SOGo/so/</label>
+    <label><input type="radio" name="q3" value="c"> 给 SOGo 传 Basic Auth 头</label>
+    <div class="why">SOGo 的登录态由 mailcow 会话驱动，<code>/SOGo/</code> 永远以「当前登录者」身份进入。
+    官方 mailbox.js 用的就是 <code>sogo-auth.php?login=</code>。</div>
+  </div>
+
+  <div class="q" data-a="b">
+    <div class="stem">4. 判断养号邮件进了收件箱还是垃圾箱，为什么<strong>不能</strong>硬编码 <code>[Gmail]/Spam</code>？</div>
+    <label><input type="radio" name="q4" value="a"> 因为 Gmail 不允许访问垃圾箱</label>
+    <label><input type="radio" name="q4" value="b"> 因为 Gmail 的文件夹名是<b>本地化</b>的（中文账号下是 <code>[Gmail]/垃圾邮件</code>），必须按 IMAP 的 <code>\Spam</code> 属性查找</label>
+    <label><input type="radio" name="q4" value="c"> 因为 IMAP 协议不支持 Spam 文件夹</label>
+    <div class="why">IMAP 的 <code>\Spam</code> 属性是语言无关的，靠它定位才能在任意语言的账号上都正确。</div>
+  </div>
+
+  <div class="q" data-a="c">
+    <div class="stem">5. 计算「垃圾箱率」时，为什么分母只算<strong>已判定</strong>的邮件（不含 unknown / missing）？</div>
+    <label><input type="radio" name="q5" value="a"> 为了让数字好看</label>
+    <label><input type="radio" name="q5" value="b"> 因为 unknown 的邮件其实没发出去</label>
+    <label><input type="radio" name="q5" value="c"> 因为 unknown/missing 既不是进箱也不是垃圾箱，算进分母会把垃圾箱率<b>稀释</b>，看起来比实际好</label>
+    <div class="why">这是统计口径问题：一个健康度指标如果把"未知"当作"正常"，就会系统性高估健康度。</div>
+  </div>
+
+  <div class="q" data-a="a">
+    <div class="stem">6. 为什么「显示邮箱登录密码明文」做不到？</div>
+    <label><input type="radio" name="q6" value="a"> 因为 mailcow 用 bcrypt 单向哈希存储，<b>数学上不可逆</b>，任何系统都无法还原</label>
+    <label><input type="radio" name="q6" value="b"> 因为数据库没存密码字段</label>
+    <label><input type="radio" name="q6" value="c"> 因为界面没做这个按钮</label>
+    <div class="why">这与"懒"无关，是密码学性质。可选的只有：重置后显示一次，或另建可逆加密的凭据记录（本次为养号收件人凭据做了后者）。</div>
+  </div>
+
+  <div class="q" data-a="b">
+    <div class="stem">7. 「下一封什么时候发」为什么要和调度器共用同一个函数算？</div>
+    <label><input type="radio" name="q7" value="a"> 为了少写代码</label>
+    <label><input type="radio" name="q7" value="b"> 因为各算各的必然漂移，界面显示的时刻会和实际发送时刻对不上——比不显示更糟</label>
+    <label><input type="radio" name="q7" value="c"> 因为调度器要求这样</label>
+    <div class="why">这是「单一事实来源」原则在时间计算上的应用：同一个概念只能有一处定义。</div>
+  </div>
+
+  <div class="q" data-a="c">
+    <div class="stem">8. 往远端推送时，为什么必须 cherry-pick 而不是直接 push 本地 master？</div>
+    <label><input type="radio" name="q8" value="a"> 因为本地提交信息不规范</label>
+    <label><input type="radio" name="q8" value="b"> 因为网络限制</label>
+    <label><input type="radio" name="q8" value="c"> 因为远端 main 与本地 master 是<b>两棵没有共同祖先的历史树</b>，force push 会丢弃远端历史与已有 tag/Release</label>
+    <div class="why">远端根提交是 <code>Initial commit</code>，本地根是上游 mailcow 的完整历史。<code>git merge-base</code> 退出码 1、无输出。</div>
+  </div>
+
+  <div class="q" data-a="a">
+    <div class="stem">9. 判断"这个按钮是不是假的"，最有说服力的做法是什么？</div>
+    <label><input type="radio" name="q9" value="a"> 扫描模板里所有控件的 id/class，逐个核对 JS 里是否存在绑定，再配合真实 DOM 渲染确认它有反馈</label>
+    <label><input type="radio" name="q9" value="b"> 肉眼看代码</label>
+    <label><input type="radio" name="q9" value="c"> 点一下看有没有反应</label>
+    <div class="why">本次用脚本审了 47 个控件，抓出 1 个没有处理器的 <code>ov_pool_reveal</code>。手工看容易漏。</div>
+  </div>
+
+  <div class="q" data-a="b">
+    <div class="stem">10. 这次修复中，最该记住的<strong>方法论</strong>是哪一条？</div>
+    <label><input type="radio" name="q10" value="a"> 尽量少改代码</label>
+    <label><input type="radio" name="q10" value="b"> 验证前端功能要验证<b>渲染后的结果</b>，而不是响应体里有没有东西——两者之间隔着一整个 JS 运行时</label>
+    <label><input type="radio" name="q10" value="c"> 多写注释</label>
+    <div class="why">这次的根因隐藏了足够久，正因为最开始把"响应体里有元素 ID"当成了"页面正常"。</div>
+  </div>
+
+  <button id="submit">提交答卷</button>
+  <button id="reset" class="ghost" style="margin-left:8px">重做</button>
+  <div id="verdict"></div>
+</section>
+
+<div class="foot">
+  由 Claude Code 生成 · 2026-10-11 · 对应 Release <code>v2026.07b-cn.7</code><br>
+  完整需求追踪矩阵与验证台账见仓库根目录 <code>workflow_status.md</code>。
+</div>
+
+</div>
+
+<script>
+(function () {
+  var qs = Array.prototype.slice.call(document.querySelectorAll('.q'));
+
+  function grade() {
+    var wrong = 0, answered = 0;
+    qs.forEach(function (q) {
+      var want = q.getAttribute('data-a');
+      var picked = q.querySelector('input:checked');
+      var why = q.querySelector('.why');
+      q.querySelectorAll('label').forEach(function (l) {
+        l.classList.remove('right', 'wrong');
+      });
+      if (!picked) { return; }
+      answered++;
+      var lbl = picked.closest('label');
+      if (picked.value === want) {
+        lbl.classList.add('right');
+        why.classList.remove('show');
+      } else {
+        lbl.classList.add('wrong');
+        q.querySelector('input[value="' + want + '"]').closest('label').classList.add('right');
+        why.classList.add('show');
+        wrong++;
+      }
+    });
+    var v = document.getElementById('verdict');
+    if (answered < qs.length) {
+      v.className = 'fail';
+      v.textContent = '还有 ' + (qs.length - answered) + ' 题没作答。全部答完才能判定。';
+      return;
+    }
+    if (wrong === 0) {
+      v.className = 'pass';
+      v.textContent = '✓ 通过（10/10）。你已经掌握这次变更的关键判断。';
+    } else {
+      v.className = 'fail';
+      v.textContent = '✗ 未通过：答错 ' + wrong + ' 题。请阅读上方红色解释后重做。';
+    }
+  }
+
+  document.getElementById('submit').addEventListener('click', grade);
+  document.getElementById('reset').addEventListener('click', function () {
+    qs.forEach(function (q) {
+      q.querySelectorAll('input').forEach(function (i) { i.checked = false; });
+      q.querySelectorAll('label').forEach(function (l) { l.classList.remove('right', 'wrong'); });
+      q.querySelector('.why').classList.remove('show');
+    });
+    document.getElementById('verdict').className = '';
+    document.getElementById('verdict').textContent = '';
+  });
+})();
+</script>
+</body>
+</html>
