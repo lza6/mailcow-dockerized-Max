@@ -261,6 +261,8 @@ $(document).ready(function () {
 
   // 可选的中继主机（邮箱级覆盖用）与「域名 → 域级中继」的显示名
   // mailcow 原生支持 mailbox.attributes.relayhost，这是正规能力不是自造
+  // 养号状态快照（供「立即执行」估算发送量用）
+  var WU_STATE = null;
   var RELAYHOSTS = [];
   var DOMAIN_RELAY = {};
 
@@ -434,7 +436,11 @@ $(document).ready(function () {
         '<td>' + next + '</td>' +
         '<td>' + p.sent_all + ' <span class="text-muted">成</span> / ' + p.fail_all + ' <span class="text-muted">败</span></td>' +
         '<td><span class="badge ' + stCls + '">' + esc(stTxt) + '</span>' +
-          (p.pause_reason ? '<div><small class="text-danger">' + esc(p.pause_reason) + '</small></div>' : '') + '</td>' +
+          (p.pause_reason ? '<div><small class="text-danger">' + esc(p.pause_reason) + '</small></div>' : '') +
+          // 上一次为什么没发出去 —— 没有它只能显示「今日未运行」，
+          // 分不清是「没到随机时刻」「配额为 0」还是「被别的计划抢光了全局额度」
+          (p.skip_reason ? '<div><small class="text-muted">上次跳过：' + esc(p.skip_reason) + '</small></div>' : '') +
+        '</td>' +
         '<td class="text-nowrap">' +
           '<button class="btn btn-sm btn-outline-secondary ov_wu_status" data-id="' + p.id +
             '" data-status="' + (p.status === 'active' ? 'paused' : 'active') + '">' +
@@ -576,6 +582,7 @@ $(document).ready(function () {
     renderDomains(d.domains);
     renderMailboxes(d.mailboxes);
     renderRelay(d.relay);
+    WU_STATE = d.warmup;
     renderWarmup(d.warmup);
     if (d.audit) { renderAudit(d.audit); }
 
@@ -866,6 +873,28 @@ $(document).ready(function () {
   /* ==================== 养号 ==================== */
   $('#ov_wu_refresh').on('click', load);
   $('#ov_wu_run').on('click', function () {
+    // 「立即执行一次」会**跳过随机时刻**（force），按各计划剩余配额 × 单次上限发出。
+    // 在计划多、配额足的时候，一次点击能把全局日上限（默认 30 封）当场发完 ——
+    // 而这恰好是本模块自己认定的「短时间批量突发 → 进垃圾箱」主因。
+    // 所以：把预计发送量摆出来让管理员自己确认，不静默猛发。
+    var w = WU_STATE || {};
+    var plans = w.plans || [];
+    var cap = w.global_cap || 30;
+    var per = w.max_per_run || 3;
+    var remainGlobal = Math.max(0, cap - (w.sent_today || 0));
+    var willSend = 0;
+    plans.forEach(function (p) {
+      if (p.status !== 'active') { return; }
+      var left = Math.max(0, (p.day_quota || 0) - (p.sent_today || 0));
+      willSend += Math.min(left, per);
+    });
+    willSend = Math.min(willSend, remainGlobal);
+    var tip = '「立即执行一次」会**跳过随机时刻**立刻发送。\n\n' +
+              '本次预计发送 ' + willSend + ' 封（全局今日还能发 ' + remainGlobal + ' / ' + cap + ' 封）。\n\n' +
+              '注意：短时间批量突发是进垃圾箱的主要原因，这一步只建议在测试或补发时用；\n' +
+              '日常养号请让定时任务按随机时刻自己跑。\n\n确定继续？';
+    if (!confirm(tip)) { return; }
+    if (willSend === 0) { notice('当前没有可发送的配额', true); return; }
     var b = $(this).prop('disabled', true).text('执行中…');
     post({ action: 'run_now' }, WU)
       .done(function (d) {

@@ -24,6 +24,11 @@ define('WARMUP_GLOBAL_DAILY_CAP', 30);
 // 失败率阈值与最小样本（达到后才判定）
 define('WARMUP_PAUSE_FAIL_RATIO', 0.5);
 define('WARMUP_PAUSE_FAIL_MIN', 4);
+// 单个收件人**每天**最多代它回复几封。
+// 只限「每轮 1 封」是不够的：cron 每 15 分钟一轮 → 理论 96 封/天，
+// 加上手动「执行互动」还能叠加。对同一个账号连发几十封正文雷同的回信，
+// 本身就是在把它往收件方的风控里推。
+define('WARMUP_REPLY_DAILY_CAP', 3);
 // 发送窗口：在每天的这个时间区间内随机
 define('WARMUP_WINDOW_START_HOUR', 8);
 define('WARMUP_WINDOW_END_HOUR', 20);
@@ -216,6 +221,18 @@ function warmup_send_mail($plan, $recipient) {
  * @param bool $force 忽略"随机时刻"限制（仅用于人工触发/测试）
  * @return array 汇总结果
  */
+/**
+ * 记录某个计划本轮被跳过的原因。
+ * 没有它的话，界面只能显示「今日未运行」，管理员分不清到底是
+ * 「没到随机时刻」「配额为 0」还是「被别的计划抢光了全局日额度」。
+ */
+function warmup_mark_skip($pdo, $planId, $reason) {
+  try {
+    $st = $pdo->prepare("UPDATE `warmup_plans` SET `last_skip_reason` = :r WHERE `id` = :i");
+    $st->execute(array(':r' => mb_substr((string)$reason, 0, 255), ':i' => (int)$planId));
+  } catch (Exception $e) {}
+}
+
 function warmup_run($pdo, $force = false) {
   $result = array(
     'checked'  => 0,
@@ -247,6 +264,7 @@ function warmup_run($pdo, $force = false) {
       $stmt = $pdo->prepare("UPDATE `warmup_plans` SET `status` = 'finished' WHERE `id` = :id");
       $stmt->execute(array(':id' => (int)$plan['id']));
       $result['skipped'][] = $plan['domain'] . ': finished (total_days reached)';
+      warmup_mark_skip($pdo, $plan['id'], '已到期（达到设定天数）');
       continue;
     }
 
@@ -255,6 +273,7 @@ function warmup_run($pdo, $force = false) {
     $remaining = $quota - $already;
     if ($remaining <= 0) {
       $result['skipped'][] = $plan['domain'] . ': daily quota reached (' . $already . '/' . $quota . ')';
+      warmup_mark_skip($pdo, $plan['id'], '今日配额已用完（' . $already . '/' . $quota . '）');
       continue;
     }
 
@@ -262,6 +281,8 @@ function warmup_run($pdo, $force = false) {
     $batch = min($remaining, WARMUP_MAX_PER_RUN, $globalCap - $globalSent);
     if ($batch <= 0) {
       $result['skipped'][] = $plan['domain'] . ': global cap';
+      warmup_mark_skip($pdo, $plan['id'],
+        '被全局日上限挤掉（全局已发 ' . $globalSent . '/' . $globalCap . '）');
       continue;
     }
 
@@ -272,6 +293,7 @@ function warmup_run($pdo, $force = false) {
       $targetTs = warmup_target_ts($plan);
       if (time() < $targetTs) {
         $result['skipped'][] = $plan['domain'] . ': before random slot ' . date('H:i', $targetTs);
+        warmup_mark_skip($pdo, $plan['id'], '未到今日随机时刻（' . date('H:i', $targetTs) . '）');
         continue;
       }
     }
@@ -293,8 +315,8 @@ function warmup_run($pdo, $force = false) {
       // 到收件人邮箱核对这封到底进了收件箱还是垃圾箱。
       try {
         $st = $pdo->prepare("INSERT INTO `warmup_messages`
-            (`plan_id`,`recipient_id`,`recipient`,`message_id`,`subject`,`send_ok`,`fail_reason`)
-            VALUES (:p,:rid,:rc,:mid,:subj,:ok,:fr)");
+            (`plan_id`,`recipient_id`,`recipient`,`message_id`,`subject`,`send_ok`,`fail_reason`,`result`)
+            VALUES (:p,:rid,:rc,:mid,:subj,:ok,:fr,:res)");
         $st->execute(array(
           ':p'    => (int)$plan['id'],
           ':rid'  => (int)$rc['id'],
@@ -303,6 +325,10 @@ function warmup_run($pdo, $force = false) {
           ':subj' => mb_substr((string)($r['subject'] ?? ''), 0, 255),
           ':ok'   => $r['ok'] ? 1 : 0,
           ':fr'   => mb_substr((string)($r['error'] ?? ''), 0, 255),
+          // 发送失败的行**直接落终态** 'failed'。
+          // 否则它会永远停在 'unknown'：判定查询只处理 send_ok=1 的行，
+          // 于是「待判定」计数只增不减，管理员会以为有大量邮件下落不明。
+          ':res'  => $r['ok'] ? 'unknown' : 'failed',
         ));
       } catch (Exception $e) {
         error_log('warmup: 写入 warmup_messages 失败: ' . $e->getMessage());
@@ -324,6 +350,8 @@ function warmup_run($pdo, $force = false) {
       ':detail'  => mb_substr(implode("\n", $errs), 0, 60000),
     ));
 
+    // 本轮真的发了 → 清掉上一次的跳过原因，避免界面显示过期信息
+    warmup_mark_skip($pdo, $plan['id'], '');
     $stmt = $pdo->prepare("UPDATE `warmup_plans`
                               SET `last_run` = NOW(0),
                                   `sent_total` = `sent_total` + :s,
@@ -429,8 +457,7 @@ function warmup_delivery_stats($pdo, $days = 30) {
         SUM(`result` = 'unknown') AS unknown,
         SUM(`replied_at` IS NOT NULL) AS replied
       FROM `warmup_messages`
-      WHERE `sent_at` >= DATE_SUB(NOW(), INTERVAL :d DAY)");
-    $row->bindValue(':d', $days, PDO::PARAM_INT);
+      WHERE `sent_at` >= DATE_SUB(NOW(), INTERVAL :d DAY)");    $row->bindValue(':d', $days, PDO::PARAM_INT);
     $row->execute();
     $r = $row->fetch(PDO::FETCH_ASSOC) ?: array();
     foreach (array('total','sent_ok','send_fail','inbox','spam','missing','unknown','replied') as $k) {
@@ -452,7 +479,7 @@ function warmup_delivery_stats($pdo, $days = 30) {
         COUNT(*) AS total,
         SUM(`result` = 'inbox') AS inbox,
         SUM(`result` = 'spam')  AS spam
-      FROM `warmup_messages` WHERE DATE(`sent_at`) = CURDATE()");
+      FROM `warmup_messages` WHERE `sent_at` >= CURDATE() AND `sent_at` < CURDATE() + INTERVAL 1 DAY");
     $row->execute();
     $r = $row->fetch(PDO::FETCH_ASSOC) ?: array();
     $out['today_total'] = (int)($r['total'] ?? 0);
@@ -568,17 +595,30 @@ function warmup_interact($pdo, $limit = 10) {
   $res = array('rescued' => 0, 'replied' => 0, 'errors' => array());
   $limit = max(1, min(50, (int)$limit));
 
+  // 尝试上限：失败的行不能无限次占着队首。
+  // 没有这两个上限时，10 条永远失败的行就会把队列堵死 ——
+  // 新进垃圾箱的邮件再也救不回来，且界面完全看不出来（踩过）。
+  $RESCUE_MAX = 5;
+  $REPLY_MAX  = 3;
+
   // ---- 1) 垃圾箱救援 ----
+  // 只挑**配了凭据**的收件人：没凭据的行根本执行不了，选进来就是空转
   $st = $pdo->prepare("SELECT m.*, r.`rescue_spam`, r.`email` AS rcpt_email
                          FROM `warmup_messages` m
                          JOIN `warmup_recipients` r ON r.`id` = m.`recipient_id`
                         WHERE m.`result` = 'spam' AND r.`rescue_spam` = 1 AND r.`active` = 1
+                          AND r.`secret_enc` IS NOT NULL AND r.`secret_enc` <> ''
+                          AND m.`rescue_attempts` < " . $RESCUE_MAX . "
                         ORDER BY m.`id` ASC LIMIT " . $limit);
   $st->execute();
   foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $m) {
     $cred = warmup_recipient_cred($pdo, (int)$m['recipient_id']);
     if (!$cred) { continue; }
     list($ok, $msg) = wwe_rescue_from_spam($cred, $m['message_id']);
+    // 无论成败都记一次尝试，避免失败行被反复选中
+    $pdo->prepare("UPDATE `warmup_messages`
+                      SET `rescue_attempts` = `rescue_attempts` + 1, `last_attempt_at` = NOW(0)
+                    WHERE `id` = :id")->execute(array(':id' => (int)$m['id']));
     if ($ok) {
       $res['rescued']++;
       $pdo->prepare("UPDATE `warmup_messages` SET `result` = 'inbox', `checked_at` = NOW(0)
@@ -588,19 +628,39 @@ function warmup_interact($pdo, $limit = 10) {
     }
   }
 
-  // ---- 2) 自动回复（每账号每轮最多 1 封）----
+  // ---- 2) 自动回复（每账号每轮最多 1 封 + 每账号每日总量上限）----
+  // 只有「每轮 1 封」是不够的：cron 每 15 分钟一轮 → 理论 96 封/天，
+  // 再加上手动的「执行互动」还能叠加。对同一个收件人账号连续发几十封
+  // 正文雷同的回信，本身就是在把那个账号往风控里推。
   $st = $pdo->prepare("SELECT m.*, p.`sender`, p.`domain`, r.`auto_reply`
                          FROM `warmup_messages` m
                          JOIN `warmup_plans` p ON p.`id` = m.`plan_id`
                          JOIN `warmup_recipients` r ON r.`id` = m.`recipient_id`
                         WHERE m.`result` = 'inbox' AND m.`replied_at` IS NULL
                           AND r.`auto_reply` = 1 AND r.`active` = 1
+                          AND r.`secret_enc` IS NOT NULL AND r.`secret_enc` <> ''
+                          AND m.`reply_attempts` < " . $REPLY_MAX . "
                         ORDER BY m.`id` ASC LIMIT " . ($limit * 2));
   $st->execute();
+
+  // 每个收件人今天已经回复了多少（用于每日上限）
+  $repliedToday = array();
+  try {
+    foreach ($pdo->query("SELECT `recipient_id`, COUNT(*) AS n FROM `warmup_messages`
+                           WHERE `replied_at` >= CURDATE() AND `replied_at` < CURDATE() + INTERVAL 1 DAY
+                           GROUP BY `recipient_id`")->fetchAll(PDO::FETCH_ASSOC) as $x) {
+      $repliedToday[(int)$x['recipient_id']] = (int)$x['n'];
+    }
+  } catch (Exception $e) {}
+
   $donePerRcpt = array();
   foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $m) {
     $rid = (int)$m['recipient_id'];
     if (!empty($donePerRcpt[$rid])) { continue; }
+    if ((isset($repliedToday[$rid]) ? $repliedToday[$rid] : 0) >= WARMUP_REPLY_DAILY_CAP) {
+      $donePerRcpt[$rid] = true;   // 本轮到量了，别再碰这个账号
+      continue;
+    }
     $cred = warmup_recipient_cred($pdo, $rid);
     if (!$cred) { continue; }
     $donePerRcpt[$rid] = true;
@@ -611,8 +671,12 @@ function warmup_interact($pdo, $limit = 10) {
       $cred, (string)$m['sender'], $subject,
       warmup_reply_body($m['domain']), (string)$m['message_id']
     );
+    $pdo->prepare("UPDATE `warmup_messages`
+                      SET `reply_attempts` = `reply_attempts` + 1, `last_attempt_at` = NOW(0)
+                    WHERE `id` = :id")->execute(array(':id' => (int)$m['id']));
     if ($ok) {
       $res['replied']++;
+      $repliedToday[$rid] = (isset($repliedToday[$rid]) ? $repliedToday[$rid] : 0) + 1;
       $pdo->prepare("UPDATE `warmup_messages` SET `replied_at` = NOW(0) WHERE `id` = :id")
           ->execute(array(':id' => (int)$m['id']));
       $pdo->prepare("UPDATE `warmup_recipients` SET `reply_count` = `reply_count` + 1

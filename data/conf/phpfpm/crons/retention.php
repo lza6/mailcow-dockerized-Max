@@ -41,6 +41,9 @@ $PLAN = array(
   'admin_audit_log'     => array('created',  'OV_RETAIN_AUDIT_DAYS',  180),
   'warmup_log'          => array('run_date', 'OV_RETAIN_WARMUP_DAYS', 365),
   'overview_mbox_daily' => array('day',      'OV_RETAIN_DAILY_DAYS',  90),
+  // 逐封明细是**增长最快**的表（每发一封 +1），原先漏了没纳进来。
+  // 它的价值主要在最近几十天（看落点与回复），保留 365 天足够排查。
+  'warmup_messages'     => array('sent_at',  'OV_RETAIN_WUMSG_DAYS',  365),
 );
 
 $BATCH = 2000;          // 每批删除行数

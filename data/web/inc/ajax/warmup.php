@@ -157,6 +157,8 @@ try {
           // 「下一封什么时候发」——与调度器同一套算法算出来，不是另算一遍
           'next_at'      => $next['at'],
           'next_state'   => $next['state'],
+          // 必须与 ov_warmup_state() 返回**同字段** —— 否则点「刷新」后这项会丢
+          'skip_reason'  => (string)$p['last_skip_reason'],
         );
       }
 
@@ -252,6 +254,20 @@ try {
       }
       if (substr(strtolower(strrchr($sender, '@')), 1) !== $domain) {
         wu_json(array('ok' => false, 'message' => 'sender domain must match domain'));
+      }
+      // 发件域必须是**本机管理的域**，发件邮箱必须真实存在且启用。
+      // 只做语法校验是不够的：php-fpm 以 mynetworks 内可信客户端身份连 postfix:25
+      // 且 SMTPAuth=false，所以给任意域（比如 billing@某支付域）建计划是能真发出去的，
+      // 而且发出去的信没有 SPF/DKIM 对齐 —— 等于在替别人发仿冒信。
+      $dc = $pdo->prepare("SELECT COUNT(*) FROM `domain` WHERE `domain` = :d AND `active` = 1");
+      $dc->execute(array(':d' => $domain));
+      if ((int)$dc->fetchColumn() === 0) {
+        wu_json(array('ok' => false, 'message' => '该域名不在本机管理范围内（或已停用），不能作为养号发件域'));
+      }
+      $mc = $pdo->prepare("SELECT COUNT(*) FROM `mailbox` WHERE `username` = :u AND `active` = 1");
+      $mc->execute(array(':u' => $sender));
+      if ((int)$mc->fetchColumn() === 0) {
+        wu_json(array('ok' => false, 'message' => '发件邮箱不存在或已停用'));
       }
 
       $start = max(1, min(50, wu_int('start_count', 2)));
@@ -358,7 +374,10 @@ try {
       $stmt->execute(array(
         ':e' => $email, ':l' => $label,
         ':ih' => $imapHost, ':ip' => $imapPort, ':sh' => $smtpHost, ':sp' => $smtpPort,
-        ':sec' => $enc,
+        // 没填密码时写 **NULL 而不是空串**：列是 `TEXT NULL DEFAULT NULL`，
+        // 写空串会让「已配置密码」的判定（IS NOT NULL）返回真，
+        // 界面出现绿色「已配置」，而实际上根本登不上 IMAP —— 自相矛盾且误导。
+        ':sec' => ($enc === '' ? null : $enc),
         ':ar' => wu_int('auto_reply', 0) ? 1 : 0,
         ':rs' => wu_int('rescue_spam', 0) ? 1 : 0,
       ));

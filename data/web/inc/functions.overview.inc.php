@@ -313,6 +313,8 @@ function ov_warmup_state($pdo) {
         'sent_all' => (int)$p['sent_all'], 'fail_all' => (int)$p['fail_all'],
         'last_run' => (string)$p['last_run'],
         'next_at' => $next['at'], 'next_state' => $next['state'],
+        // 上一次被跳过的原因（没到点 / 配额用完 / 被全局上限挤掉）
+        'skip_reason' => (string)$p['last_skip_reason'],
       );
       $sentTotal += (int)$p['sent_all'];
       $failTotal += (int)$p['fail_all'];
@@ -320,8 +322,11 @@ function ov_warmup_state($pdo) {
   } catch (Exception $e) {}
 
   try {
-    // 注意：**不取 secret_enc**，界面只显示「是否已配置密码」
-    $rows = $pdo->query("SELECT `id`,`email`,`label`,`active`,`secret_enc` IS NOT NULL AS `has_secret`,
+    // 注意：**不取 secret_enc**，界面只显示「是否已配置密码」。
+    // 判定必须是 `IS NOT NULL AND <> ''` —— 只用 IS NOT NULL 的话，
+    // 历史上被写成空串的行会显示成「已配置」，而实际登不上 IMAP。
+    $rows = $pdo->query("SELECT `id`,`email`,`label`,`active`,
+                                (`secret_enc` IS NOT NULL AND `secret_enc` <> '') AS `has_secret`,
                                 `verify_status`,`last_verify`,`last_check`,
                                 `inbox_count`,`spam_count`,`reply_count`,`auto_reply`,`rescue_spam`,
                                 `imap_host`,`imap_port`,`smtp_host`,`smtp_port`

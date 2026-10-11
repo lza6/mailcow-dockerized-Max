@@ -200,15 +200,24 @@ function wwe_find_message($conn, $messageId, $spamFolder, $ref) {
   $lookup = function ($folder) use ($conn, $bare) {
     if ($folder !== '' && !@imap_reopen($conn, $folder)) { return 0; }
 
+    /**
+     * 一次取回所有候选邮件的头，再本地比对 —— **不要逐封 imap_headerinfo**。
+     *
+     * 逐封取的话，兜底那级一次最多 300 封候选就是 300 次网络往返；
+     * 一轮判定 20 封邮件 → 6000 次往返，会把 php-fpm worker 拖死。
+     * imap_fetch_overview() 用一个 UID 列表一次拿完（含 message_id），
+     * 往返次数从 O(n) 降到 1。
+     */
     $verify = function ($uids, $limit) use ($conn, $bare) {
-      $checked = 0;
-      foreach ((array)$uids as $u) {
-        if ($checked++ >= $limit) { break; }
-        $no = @imap_msgno($conn, (int)$u);
-        if (!$no) { continue; }
-        $h = @imap_headerinfo($conn, $no);
-        if (!$h) { continue; }
-        if (strtolower(trim((string)$h->message_id, " \t<>")) === $bare) { return (int)$u; }
+      $uids = array_slice(array_values((array)$uids), 0, $limit);
+      if (empty($uids)) { return 0; }
+      $ov = @imap_fetch_overview($conn, implode(',', $uids), FT_UID);
+      if (!is_array($ov)) { return 0; }
+      foreach ($ov as $o) {
+        if (!isset($o->message_id)) { continue; }
+        if (strtolower(trim((string)$o->message_id, " \t<>")) === $bare) {
+          return (int)$o->uid;
+        }
       }
       return 0;
     };
@@ -229,14 +238,13 @@ function wwe_find_message($conn, $messageId, $spamFolder, $ref) {
       if ($hit > 0) { return $hit; }
     }
 
-    // ③ 兜底：列出最近 N 天的邮件逐封比对（不依赖任何搜索语义）
+    // ③ 兜底：列出最近 N 天的邮件一次取完头再比对（不依赖任何搜索语义）
     $since = date('d-M-Y', time() - 14 * 86400);
     $r3 = @imap_search($conn, 'SINCE "' . $since . '"', SE_UID);
     @imap_errors();
     if (is_array($r3) && $r3) {
       // 从最新往前找（新邮件更可能是我们刚发的）
-      $uids = array_reverse($r3);
-      $hit = $verify($uids, 300);
+      $hit = $verify(array_reverse($r3), 300);
       if ($hit > 0) { return $hit; }
     }
     return 0;

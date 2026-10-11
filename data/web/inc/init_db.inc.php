@@ -8,7 +8,7 @@ function init_db_schema()
   //    init_db_schema() 在 `versions.db_schema` 与本值相等时**直接 return**，
   //    不会执行下面的表结构差异 —— 忘了改的话新表永远不会被建出来，
   //    而且不报错（业务侧只会静默写不进数据）。
-  //    $db_version = "12102026_0100";
+  //    $db_version = "13102026_0100";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
@@ -217,7 +217,11 @@ function init_db_schema()
           "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
           "last_run" => "DATETIME(0) NULL DEFAULT NULL",
           "sent_total" => "INT NOT NULL DEFAULT '0'",
-          "fail_total" => "INT NOT NULL DEFAULT '0'"
+          "fail_total" => "INT NOT NULL DEFAULT '0'",
+          // 上一次被跳过的原因（如「被全局日上限挤掉」）。
+          // 没有它的话，界面只能显示「今日未运行」，管理员分不清是
+          // 「没到随机时刻」「配额为 0」还是「被别的计划抢光了全局额度」。
+          "last_skip_reason" => "VARCHAR(255) NOT NULL DEFAULT ''"
         ),
         "keys" => array(
           "primary" => array(
@@ -280,7 +284,13 @@ function init_db_schema()
           // inbox / spam / missing / unknown —— 「垃圾箱率」的唯一可信来源
           "result" => "VARCHAR(16) NOT NULL DEFAULT 'unknown'",
           "checked_at" => "DATETIME(0) NULL DEFAULT NULL",
-          "replied_at" => "DATETIME(0) NULL DEFAULT NULL"
+          "replied_at" => "DATETIME(0) NULL DEFAULT NULL",
+          // 尝试计数：没有它的话，「救援/回复失败」的行会永远满足候选条件
+          // （result 保持 spam / replied_at 保持 NULL），每轮都被重新选中并再次失败，
+          // 把队列头部堵死 —— 新邮件再也处理不到，且界面完全看不出来。
+          "reply_attempts" => "INT NOT NULL DEFAULT '0'",
+          "rescue_attempts" => "INT NOT NULL DEFAULT '0'",
+          "last_attempt_at" => "DATETIME(0) NULL DEFAULT NULL"
         ),
         "keys" => array(
           "primary" => array(
@@ -289,7 +299,11 @@ function init_db_schema()
           "key" => array(
             "plan_id" => array("plan_id"),
             "message_id" => array("message_id"),
-            "result" => array("result")
+            "result" => array("result"),
+            // 统计按时间范围查（见 warmup_delivery_stats），必须有它
+            "sent_at" => array("sent_at"),
+            // 按收件人分组统计与「每账号每日回复上限」都要它
+            "recipient_result" => array("recipient_id", "result")
           )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
