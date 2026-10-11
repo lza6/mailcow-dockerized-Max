@@ -516,9 +516,9 @@ function warmup_check_deliveries($pdo, $limit = 20) {
       continue;
     }
     try {
-      $spam = wwe_spam_folder($conn);
+      $spam = wwe_spam_folder($conn, wwe_ref($cred));
       foreach ($msgs as $m) {
-        $f = wwe_find_message($conn, $m['message_id'], $spam);
+        $f = wwe_find_message($conn, $m['message_id'], $spam, wwe_ref($cred));
         $state = $f['state'];
         if ($state === 'missing') {
           // 找不到就先记 missing 但不落库为终态 —— 可能只是还没投递完，

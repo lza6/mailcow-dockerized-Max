@@ -200,11 +200,35 @@ try {
         );
       }
 
+      // 逐封明细（发给谁 / Message-ID / 真实落点 / 是否已回复）。
+      // **必须和 ov_warmup_state() 返回同一组字段** —— 否则点「刷新」后
+      // 逐封明细表会被 d.messages 为 undefined 清空，首屏有数据、刷新就没了。
+      $msgOut = array();
+      try {
+        $rows = $pdo->query("SELECT m.`id`, m.`plan_id`, m.`recipient`, m.`message_id`,
+                                    m.`subject`, m.`sent_at`, m.`send_ok`, m.`fail_reason`,
+                                    m.`result`, m.`checked_at`, m.`replied_at`, p.`sender`
+                               FROM `warmup_messages` m
+                               LEFT JOIN `warmup_plans` p ON p.`id` = m.`plan_id`
+                              ORDER BY m.`id` DESC LIMIT 50")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as $x) {
+          $msgOut[] = array(
+            'id' => (int)$x['id'], 'plan_id' => (int)$x['plan_id'],
+            'recipient' => (string)$x['recipient'], 'message_id' => (string)$x['message_id'],
+            'subject' => (string)$x['subject'], 'sent_at' => (string)$x['sent_at'],
+            'send_ok' => (int)$x['send_ok'], 'fail_reason' => (string)$x['fail_reason'],
+            'result' => (string)$x['result'], 'checked_at' => (string)$x['checked_at'],
+            'replied_at' => (string)$x['replied_at'], 'sender' => (string)$x['sender'],
+          );
+        }
+      } catch (Exception $e) { error_log('warmup: 读取逐封明细失败: ' . $e->getMessage()); }
+
       wu_json(array(
         'ok'             => true,
         'plans'          => $out,
         'recipients'     => $rcOut,
         'logs'           => $logOut,
+        'messages'       => $msgOut,
         'sent_today'     => warmup_sent_today_total($pdo),
         'global_cap'     => WARMUP_GLOBAL_DAILY_CAP,
         'max_per_run'    => WARMUP_MAX_PER_RUN,
@@ -347,8 +371,8 @@ try {
         if ($cred) {
           list($conn, $err) = wwe_connect($cred, 'INBOX');
           if ($conn !== false) {
-            $folders = @imap_getmailboxes($conn, '', '*');
-            $n = is_array($folders) ? count($folders) : 0;
+            $folders = wwe_list_folders($conn, wwe_ref($cred));
+            $n = count($folders);
             @imap_close($conn);
             $verify = array('ok' => true, 'message' => 'IMAP 验证通过，可见 ' . $n . ' 个文件夹');
           } else {
@@ -374,9 +398,9 @@ try {
                         WHERE `id` = :i")->execute(array(':s' => mb_substr('失败: ' . $err, 0, 255), ':i' => $id));
         wu_json(array('ok' => false, 'message' => 'IMAP 验证失败：' . $err));
       }
-      $folders = @imap_getmailboxes($conn, '', '*');
-      $n = is_array($folders) ? count($folders) : 0;
-      $spam = wwe_spam_folder($conn);
+      $folders = wwe_list_folders($conn, wwe_ref($cred));
+      $n = count($folders);
+      $spam = wwe_spam_folder($conn, wwe_ref($cred));
       @imap_close($conn);
       $msg = 'IMAP 验证通过，可见 ' . $n . ' 个文件夹' . ($spam !== '' ? ('；垃圾箱=' . $spam) : '；未找到垃圾箱文件夹');
       $pdo->prepare("UPDATE `warmup_recipients` SET `verify_status` = :s, `last_verify` = NOW(0)
