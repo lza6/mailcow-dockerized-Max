@@ -55,7 +55,37 @@
         <div class="fs-4" id="ov_stat_today">—</div>
       </div></div>
     </div>
+    <div class="col-6 col-lg-2">
+      <div class="card h-100"><div class="card-body py-2">
+        <div class="text-muted small">养号进箱率（30天）</div>
+        <div class="fs-4" id="ov_stat_ibox">—</div>
+        <div><small class="text-muted" id="ov_stat_ibox_sub">—</small></div>
+      </div></div>
+    </div>
+    <div class="col-6 col-lg-2">
+      <div class="card h-100"><div class="card-body py-2">
+        <div class="text-muted small">养号垃圾箱率（30天）</div>
+        <div class="fs-4" id="ov_stat_spam">—</div>
+        <div><small class="text-muted" id="ov_stat_spam_sub">—</small></div>
+      </div></div>
+    </div>
+    <div class="col-6 col-lg-2">
+      <div class="card h-100"><div class="card-body py-2">
+        <div class="text-muted small">号池今日可发</div>
+        <div class="fs-4" id="ov_stat_pool">—</div>
+        <div><small class="text-muted" id="ov_stat_pool_sub">—</small></div>
+      </div></div>
+    </div>
+    <div class="col-6 col-lg-2">
+      <div class="card h-100"><div class="card-body py-2">
+        <div class="text-muted small">号池剩余可绑</div>
+        <div class="fs-4" id="ov_stat_pool_left">—</div>
+        <div><small class="text-muted" id="ov_stat_pool_left_sub">—</small></div>
+      </div></div>
+    </div>
   </div>
+
+  <div class="alert alert-secondary py-1 px-2 small mb-3" id="ov_data_sources"></div>
 
   <div id="ov_notice"></div>
 
@@ -109,14 +139,15 @@
         <table id="ov_tbl_mbox" class="table table-sm table-hover mb-0 align-middle">
           <thead class="table-light" style="position:sticky;top:0">
             <tr>
-              <th style="width:24%">邮箱</th>
-              <th style="width:13%">所属域</th>
-              <th style="width:7%">状态</th>
-              <th style="width:11%">出站账号</th>
-              <th style="width:10%">邮件数</th>
+              <th style="width:21%">邮箱</th>
+              <th style="width:11%">所属域</th>
+              <th style="width:6%">状态</th>
+              <th style="width:10%">出站账号</th>
+              <th style="width:9%">邮件数</th>
+              <th style="width:12%">最近养号发送</th>
               <th style="width:7%">今日新增</th>
-              <th style="width:8%">配额</th>
-              <th style="width:20%">操作</th>
+              <th style="width:7%">配额</th>
+              <th style="width:17%">操作</th>
             </tr>
           </thead>
           <tbody id="ov_mbox_body">

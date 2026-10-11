@@ -514,6 +514,20 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
     );
   }
 
+  // ---- 每个发件邮箱最近一次养号发送（用于邮箱列表展示）----
+  // 注意：这是**养号邮件**的最近时间，不是「该邮箱收到的最后一封信」。
+  // 后者需要访问邮件存储（vmail 卷）或 doveadm，出于安全本容器两者都没有
+  // （dockerapi 的 exec 只派发预定义方法，不提供任意命令执行）。
+  $lastWu = array();
+  try {
+    foreach ($pdo->query("SELECT p.`sender`, MAX(m.`sent_at`) AS `last_at`, COUNT(*) AS `n`
+                           FROM `warmup_messages` m
+                           JOIN `warmup_plans` p ON p.`id` = m.`plan_id`
+                          GROUP BY p.`sender`")->fetchAll(PDO::FETCH_ASSOC) as $x) {
+      $lastWu[$x['sender']] = array('last_at' => (string)$x['last_at'], 'n' => (int)$x['n']);
+    }
+  } catch (Exception $e) {}
+
   // ---- 邮箱清单 ----
   $mbox = array();
   foreach ($pdo->query(
@@ -536,6 +550,8 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       // 该邮箱的出站走哪个号池账号 —— 由**所属域**的绑定决定（mailcow 的中继
       // 是域级的，不是邮箱级），所以同一域下的邮箱拿到的值相同。
       'relay_acct'=> isset($relayAcct[$m['domain']]) ? $relayAcct[$m['domain']] : null,
+      // 该邮箱作为发件人的最近一次养号发送（没有计划则为 null）
+      'last_warmup' => isset($lastWu[$u]) ? $lastWu[$u] : null,
     );
   }
 

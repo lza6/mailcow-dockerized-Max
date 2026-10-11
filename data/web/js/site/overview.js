@@ -106,7 +106,8 @@ $(document).ready(function () {
     return '<span class="text-danger fw-bold">' + d + ' 天</span>';
   }
 
-  function renderStats(s) {
+  function renderStats(d) {
+    var s = d.stats || {};
     $('#ov_stat_domains').text(s.domains);
     $('#ov_stat_mailboxes').text(s.mailboxes);
     $('#ov_stat_msg').text(s.messages);
@@ -114,6 +115,41 @@ $(document).ready(function () {
     var ab = $('#ov_stat_abnormal').text(s.abnormal);
     ab.toggleClass('text-danger fw-bold', s.abnormal > 0);
     $('#ov_stat_today').text(s.today_sent);
+
+    // 养号进箱率 / 垃圾箱率（来自收件人邮箱的真实核对，详见养号卡片）
+    var ws = (d.warmup && d.warmup.stats) || {};
+    function rateHtml(rate, good) {
+      if (rate === null || rate === undefined) { return '<span class="text-muted fs-6">未判定</span>'; }
+      var cls = good ? (rate >= 90 ? 'text-success' : (rate >= 70 ? 'text-warning' : 'text-danger'))
+                     : (rate <= 5 ? 'text-success' : (rate <= 20 ? 'text-warning' : 'text-danger'));
+      return '<span class="' + cls + '">' + rate + '%</span>';
+    }
+    $('#ov_stat_ibox').html(rateHtml(ws.inbox_rate, true));
+    $('#ov_stat_ibox_sub').text('进箱 ' + (ws.inbox || 0) + ' / 已判定 ' +
+      ((ws.inbox || 0) + (ws.spam || 0)) + (ws.unknown ? ('，待判定 ' + ws.unknown) : ''));
+    $('#ov_stat_spam').html(rateHtml(ws.spam_rate, false));
+    $('#ov_stat_spam_sub').text('垃圾箱 ' + (ws.spam || 0) + ' 封');
+    if ((ws.inbox || 0) + (ws.spam || 0) === 0) {
+      $('#ov_stat_ibox_sub').html('<span class="text-danger">需先给收件账号配置应用专用密码</span>');
+      $('#ov_stat_spam_sub').text('');
+    }
+
+    // 号池今日可发总量 = 各启用账号 daily_quota 之和
+    var r = d.relay || {};
+    $('#ov_stat_pool').text(r.quota_total === undefined ? '—' : r.quota_total);
+    $('#ov_stat_pool_sub').text((r.active_accounts || 0) + ' 个启用账号的日额度合计');
+    var left = $('#ov_stat_pool_left').text(r.left === undefined ? '—' : r.left);
+    left.toggleClass('text-danger fw-bold', (r.left || 0) <= 0);
+    $('#ov_stat_pool_left_sub').text('已绑 ' + (r.used || 0) + ' / 容量 ' + (r.capacity || 0));
+
+    // 数据来源说明 —— 每个数字都要能说清"从哪来"，否则无法判断它可不可信
+    $('#ov_data_sources').html(
+      '<b>数据来源</b>：' +
+      '域名/邮箱/邮件数 — 本地数据库（<code>domain</code> / <code>mailbox</code> / <code>quota2</code>，不调 doveadm 所以快）；' +
+      '注册时长 — RDAP（实测最快的根域注册局接口）；' +
+      'MX / SPF / DKIM / DMARC — 由「体检」动作实时 <code>dns_get_record()</code> 查询后写缓存 1 小时，页面只读缓存（所以首屏不发起 DNS）；' +
+      '养号进箱率/垃圾箱率 — 用收件账号的 IMAP 到它自己的收件箱与垃圾箱里按 <code>Message-ID</code> 反查得出；' +
+      '号池额度 — 本地号池配置（<code>resend_accounts.daily_quota</code>），非 Resend 官方实时余额。');
   }
 
   function renderDomains(rows) {
@@ -168,7 +204,7 @@ $(document).ready(function () {
 
   function renderMailboxes(rows) {
     if (!rows.length) {
-      body('#ov_mbox_body', '#ov_tbl_mbox').html('<tr><td colspan="8" class="text-center text-muted py-4">暂无邮箱</td></tr>');
+      body('#ov_mbox_body', '#ov_tbl_mbox').html('<tr><td colspan="9" class="text-center text-muted py-4">暂无邮箱</td></tr>');
       return;
     }
     var h = '';
@@ -188,6 +224,10 @@ $(document).ready(function () {
                     ? '<span class="badge bg-primary">' + esc(acct) + '</span>'
                     : '<span class="text-muted">直发</span>') + '</td>' +
         '<td>' + m.messages + ' <small class="text-muted">(' + esc(used) + ')</small></td>' +
+        '<td>' + (m.last_warmup && m.last_warmup.last_at
+                    ? ('<small>' + esc(m.last_warmup.last_at) + '</small>' +
+                       '<div><small class="text-muted">累计 ' + m.last_warmup.n + ' 封</small></div>')
+                    : '<span class="text-muted">—</span>') + '</td>' +
         '<td>' + (m.today_new > 0
                     ? '<span class="badge bg-success">+' + m.today_new + '</span>'
                     : '<span class="text-muted">0</span>') + '</td>' +
@@ -507,7 +547,7 @@ $(document).ready(function () {
   function apply(d) {
     if (!d || !d.ok) { notice((d && d.message) || '加载失败', true); return; }
     updateCsrf(d);
-    renderStats(d.stats);
+    renderStats(d);
     renderDomains(d.domains);
     renderMailboxes(d.mailboxes);
     renderRelay(d.relay);
