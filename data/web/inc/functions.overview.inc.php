@@ -514,6 +514,32 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
     );
   }
 
+  // ---- 可选的中继主机列表（供邮箱级覆盖用）----
+  // mailcow 原生支持 mailbox.attributes.relayhost；这里只是把可选项列出来。
+  $relayhosts = array();
+  try {
+    foreach ($pdo->query("SELECT `id`, `hostname`, `username`, `active`
+                            FROM `relayhosts` ORDER BY `active` DESC, `id` ASC")->fetchAll(PDO::FETCH_ASSOC) as $x) {
+      $relayhosts[] = array(
+        'id' => (int)$x['id'],
+        'hostname' => (string)$x['hostname'],
+        'username' => (string)$x['username'],
+        'active' => (int)$x['active'],
+        'label' => $x['hostname'] . ($x['username'] !== '' ? (' (' . $x['username'] . ')') : ''),
+      );
+    }
+  } catch (Exception $e) {}
+
+  // ---- 邮箱的「中继覆盖」值（0 = 继承所属域）----
+  $relayOverride = array();
+  try {
+    foreach ($pdo->query("SELECT `username`,
+                                 JSON_UNQUOTE(JSON_VALUE(`attributes`, '\$.relayhost')) AS `rh`
+                            FROM `mailbox`")->fetchAll(PDO::FETCH_ASSOC) as $x) {
+      $relayOverride[$x['username']] = (int)$x['rh'];
+    }
+  } catch (Exception $e) {}
+
   // ---- 每个邮箱的收信统计（由 dovecot 侧的 mailstats.sh 定时采集，Web 只读）----
   // 表可能还没被 cron 填过 → 全部为 null，界面显示「—」，不报错。
   $mailStats = array();
@@ -569,6 +595,8 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       // 真实收信统计（dovecot 侧采集）。未采集到为 null，前端显示「—」
       'last_received'  => isset($mailStats[$u]) ? $mailStats[$u]['last_received'] : null,
       'today_received' => isset($mailStats[$u]) ? $mailStats[$u]['today_received'] : null,
+      // 邮箱级中继覆盖（0 = 继承所属域的中继）。非 0 时优先于域级设置。
+      'relay_override' => isset($relayOverride[$u]) ? $relayOverride[$u] : 0,
     );
   }
 
@@ -598,6 +626,7 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
     'domains'   => $out,
     'mailboxes' => $mbox,
     'relay'     => $relay,
+    'relayhosts'=> $relayhosts,
     'warmup'    => $warmup,
     'stats'     => array(
       'domains'   => count($out),

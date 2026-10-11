@@ -23,8 +23,8 @@
 | R6 | 域名绑定/解绑/一键自动分配 | `inc/ajax/resend_pool.php` | done | 生产绑定表 3 行 verified | — |
 | R7 | CF Token 可见/可改 | `reveal_secret kind=cf` | done | 实测返回 53 字符并落审计 | — |
 | R8 | **邮箱显示走哪个中继账号** | `ov_relay_pool` → `relay_acct` | done | jsdom 实测：3 个邮箱显示 `Resend-账号1`，其余「直发」 | — |
-| R9 | 邮箱表显示最近邮件时间 / 今日邮件数 | — | **todo** | — | 需要从 dovecot/quota2 取「最近一封时间」；`quota2` 无此字段，需查 maildir 或加索引 |
-| R10 | 邮箱可改绑定的 re 账号 | — | **todo** | — | 域名级绑定已有；邮箱级覆盖需新表（mailcow 中继是域级的） |
+| R9 | 邮箱表显示最近邮件时间 / 今日邮件数 | `data/conf/dovecot/mailstats.sh` → `mailbox_mailstats` | **done** | 生产实测 17 个邮箱全部采集；daniel 今日 2 封 | — |
+| R10 | 邮箱可改绑定的 re 账号 | `ajax/overview.php set_mailbox_relay` | **done** | 实测改→库生效→改回→非法值被拒→审计 4 条。用的是 mailcow **原生** `mailbox.attributes.relayhost` | — |
 | R11 | 密码可显示/复制 | 登录密码：**不可行** | blocked | bcrypt 单向哈希，数学不可逆 | 见 R12 的替代方案 |
 | R12 | 养号用的收件人凭据可保存/使用 | `inc/functions.secretbox.inc.php` | done | 加密→解密往返正确；篡改后返回空串；密钥 0600 且不在 web 目录 | — |
 | R13 | 养号：真实进箱/垃圾箱判定 | `inc/functions.warmup_ext.inc.php` + `warmup_messages` | done（待数据） | 代码 + 表 + cron 就位；`\Spam` 属性查找（不硬编码本地化文件夹名） | **需要 Google 应用专用密码**才会产生数据 |
@@ -69,6 +69,8 @@
 | 并发写压测 | 2026-07b-cn.5 | 600 次 0 失败 0 死锁 | 改 `ov_write()` 或 mailbox 写路径后 |
 | **养号互动链路真实 E2E** | 2026-07b-cn.8 | 发信2→判定inbox→检出spam→救援→自动回复，全通 | 改 `functions.warmup_ext.inc.php` / `warmup_interact` / cron 后 |
 | 顶部指标渲染 | 2026-07b-cn.9 | 10 个指标全部有值 | 改 `overview.twig` / `renderStats` 后 |
+| 邮件统计采集器 | 2026-07b-cn.10 | 17 邮箱全覆盖，采集正确 | 改 `mailstats.sh` 或 dovecot 容器后 |
+| 邮箱级中继切换 | 2026-07b-cn.10 | 改→生效→改回→非法值被拒，审计 4 条 | 改 `set_mailbox_relay` 后 |
 | 只读压测 | 2026-07b-cn.4 | 1950 请求 0 失败，峰值 ~123 RPS | 改 `overview_build()` 或加首屏网络 I/O 后 |
 | 数据库索引 | 2026-07b-cn.5 | `overview_mbox_daily.day`、`warmup_log.plan_run` 已建 | 改 `init_db.inc.php` 后 |
 
@@ -95,7 +97,9 @@
 
 ---
 
-## 五、本仓库特有的四个"坑"（已沉淀为记忆 + 脚本）
+## 五、本仓库特有的坑（已沉淀为记忆 + 脚本 + SOP）
+
+> 完整版见 `docs/04-运维与工程/SOP-新增功能与API.md` §2
 
 | 坑 | 症状 | 防护 |
 |---|---|---|

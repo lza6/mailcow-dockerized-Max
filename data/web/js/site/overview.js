@@ -220,9 +220,20 @@ $(document).ready(function () {
         '<td>' + (parseInt(m.active, 10) === 1
                     ? '<span class="badge bg-success">启用</span>'
                     : '<span class="badge bg-secondary">停用</span>') + '</td>' +
-        '<td>' + (acct
-                    ? '<span class="badge bg-primary">' + esc(acct) + '</span>'
-                    : '<span class="text-muted">直发</span>') + '</td>' +
+        '<td>' + (function () {
+          // 邮箱级中继：0 = 继承所属域；非 0 时优先于域级设置（mailcow 原生能力）
+          var cur = parseInt(m.relay_override, 10) || 0;
+          var domLabel = DOMAIN_RELAY[m.domain] || '直发';
+          var o = '<option value="0"' + (cur === 0 ? ' selected' : '') + '>继承域名（' + esc(domLabel) + '）</option>';
+          RELAYHOSTS.forEach(function (rh) {
+            o += '<option value="' + rh.id + '"' + (cur === rh.id ? ' selected' : '') + '>' +
+                 esc(rh.label) + (rh.active === 1 ? '' : '（已停用）') + '</option>';
+          });
+          var cls = cur > 0 ? 'text-warning fw-bold' : '';
+          return '<select class="form-select form-select-sm ov_mbox_relay" data-user="' + esc(m.username) +
+                 '" style="min-width:11rem">' + o + '</select>' +
+                 (cur > 0 ? '<div><small class="' + cls + '">已覆盖域级设置</small></div>' : '');
+        })() + '</td>' +
         '<td>' + m.messages + ' <small class="text-muted">(' + esc(used) + ')</small></td>' +
         '<td>' + (m.last_received
                     ? ('<small>' + esc(m.last_received) + '</small>' +
@@ -247,6 +258,11 @@ $(document).ready(function () {
 
   // 明文密钥只在前端缓存里，默认不请求；点了「显示」才向后端要一次（后端会记审计）
   var revealed = {};
+
+  // 可选的中继主机（邮箱级覆盖用）与「域名 → 域级中继」的显示名
+  // mailcow 原生支持 mailbox.attributes.relayhost，这是正规能力不是自造
+  var RELAYHOSTS = [];
+  var DOMAIN_RELAY = {};
 
   function keyCell(id, masked, len) {
     if (revealed['resend:' + id]) {
@@ -550,6 +566,13 @@ $(document).ready(function () {
     if (!d || !d.ok) { notice((d && d.message) || '加载失败', true); return; }
     updateCsrf(d);
     renderStats(d);
+    RELAYHOSTS = d.relayhosts || [];
+    DOMAIN_RELAY = {};
+    (d.domains || []).forEach(function (x) {
+      DOMAIN_RELAY[x.domain] = (x.relay_acct && x.relay_acct.label)
+        ? x.relay_acct.label
+        : (x.relay ? x.relay : '直发');
+    });
     renderDomains(d.domains);
     renderMailboxes(d.mailboxes);
     renderRelay(d.relay);
@@ -663,6 +686,20 @@ $(document).ready(function () {
       if (d.ok) { notice('域名已添加'); $('#ov_new_domain,#ov_new_domain_desc').val(''); load(); }
       else { notice(d.message || '添加失败', true); }
     }).fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); });
+  });
+
+  // 邮箱级中继切换（mailcow 原生能力：mailbox.attributes.relayhost）
+  $(document).on('change', '.ov_mbox_relay', function () {
+    var u = $(this).data('user');
+    var rid = $(this).val();
+    var sel = $(this).prop('disabled', true);
+    post({ action: 'set_mailbox_relay', username: u, relayhost_id: rid })
+      .done(function (d) {
+        if (d && d.ok) { notice(u + ' 的出站中继已设为：' + (d.label || '')); load(); }
+        else { notice((d && d.message) || '设置失败', true); load(); }
+      })
+      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); load(); })
+      .always(function () { sel.prop('disabled', false); });
   });
 
   $('#ov_add_mbox').on('click', function () {

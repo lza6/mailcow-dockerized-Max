@@ -30,6 +30,7 @@ $action = isset($_REQUEST['action']) ? (string)$_REQUEST['action'] : '';
 $write_actions = array(
   'add_domain', 'add_mailbox', 'reset_mailbox_password',
   'toggle_mailbox', 'check_domain', 'check_all',
+  'set_mailbox_relay',   // 邮箱级中继覆盖（mailcow 原生能力，非自造）
   // reveal_secret 本身不改数据，但它会把明文密钥下发到浏览器并写审计，
   // 按「有副作用的动作」对待：拒绝 API 会话 + 强制 POST（防被动的 GET 触发）。
   'reveal_secret',
@@ -577,6 +578,58 @@ try {
         ov_json(array('ok' => true, 'active' => $new));
       } catch (Exception $e) {
         ov_fatal($pdo, 'mailbox.toggle', $user, $e);
+      }
+    }
+
+    // ================= 邮箱级中继覆盖 =================
+    // mailcow **原生支持**按邮箱指定中继（存在 mailbox.attributes.relayhost，
+    // 由 postfix 的 sender_dependent_default_transport_maps 读取，
+    // 见 functions.mailbox.inc.php 与 data/Dockerfiles/postfix/postfix.sh）。
+    // 这里不是自造机制，只是把这个能力暴露到总览页。
+    // relayhost_id = 0 表示「继承所属域的中继」。
+    case 'set_mailbox_relay': {
+      $user = strtolower(ov_post('username'));
+      $rid  = (int)ov_post('relayhost_id', '0');
+      if (!ov_valid_email($user)) {
+        audit_log($pdo, 'mailbox.set_relay', 'mailbox', $user, 'fail', 'invalid address');
+        ov_json(array('ok' => false, 'message' => '邮箱地址不合法'));
+      }
+      $chk = $pdo->prepare("SELECT COUNT(*) FROM `mailbox` WHERE `username` = :u");
+      $chk->execute(array(':u' => $user));
+      if ((int)$chk->fetchColumn() === 0) {
+        audit_log($pdo, 'mailbox.set_relay', 'mailbox', $user, 'fail', 'no such mailbox');
+        ov_json(array('ok' => false, 'message' => '邮箱不存在'));
+      }
+      // 校验目标中继确实存在且启用，避免把 attributes 指向一个不存在的 id
+      // （那会让 postfix 的 SQL 查不到中继，静默回落到直发 —— 很难排查）
+      $label = '继承所属域';
+      if ($rid > 0) {
+        $st = $pdo->prepare("SELECT `hostname`,`username`,`active` FROM `relayhosts` WHERE `id` = :i LIMIT 1");
+        $st->execute(array(':i' => $rid));
+        $r = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$r) {
+          audit_log($pdo, 'mailbox.set_relay', 'mailbox', $user, 'fail', 'relayhost #' . $rid . ' not found');
+          ov_json(array('ok' => false, 'message' => '中继 #' . $rid . ' 不存在'));
+        }
+        if ((int)$r['active'] !== 1) {
+          audit_log($pdo, 'mailbox.set_relay', 'mailbox', $user, 'fail', 'relayhost #' . $rid . ' inactive');
+          ov_json(array('ok' => false, 'message' => '中继 #' . $rid . ' 已停用，请先启用'));
+        }
+        $label = $r['hostname'] . ' (' . ($r['username'] !== '' ? $r['username'] : '无用户名') . ')';
+      }
+      try {
+        list($ok, $msg) = ov_write($pdo, 'mailbox:' . $user, function () use ($user, $rid) {
+          return mailbox('edit', 'mailbox', array('username' => $user, 'relayhost' => $rid));
+        });
+        if (!$ok) {
+          audit_log($pdo, 'mailbox.set_relay', 'mailbox', $user, 'fail', $msg);
+          ov_json(array('ok' => false, 'message' => '设置失败：' . $msg));
+        }
+        audit_log($pdo, 'mailbox.set_relay', 'mailbox', $user, 'ok',
+                  'relayhost=' . $rid . ' (' . $label . ')');
+        ov_json(array('ok' => true, 'relayhost_id' => $rid, 'label' => $label));
+      } catch (Exception $e) {
+        ov_fatal($pdo, 'mailbox.set_relay', $user, $e);
       }
     }
 
