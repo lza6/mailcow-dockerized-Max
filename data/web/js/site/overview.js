@@ -224,13 +224,15 @@ $(document).ready(function () {
                     ? '<span class="badge bg-primary">' + esc(acct) + '</span>'
                     : '<span class="text-muted">直发</span>') + '</td>' +
         '<td>' + m.messages + ' <small class="text-muted">(' + esc(used) + ')</small></td>' +
+        '<td>' + (m.last_received
+                    ? ('<small>' + esc(m.last_received) + '</small>' +
+                       '<div><small class="' + (m.today_received > 0 ? 'text-success fw-bold' : 'text-muted') +
+                       '">今日 ' + (m.today_received || 0) + ' 封</small></div>')
+                    : '<span class="text-muted" title="由 dovecot 侧的采集任务提供，每 10 分钟刷新一次">—</span>') + '</td>' +
         '<td>' + (m.last_warmup && m.last_warmup.last_at
                     ? ('<small>' + esc(m.last_warmup.last_at) + '</small>' +
                        '<div><small class="text-muted">累计 ' + m.last_warmup.n + ' 封</small></div>')
                     : '<span class="text-muted">—</span>') + '</td>' +
-        '<td>' + (m.today_new > 0
-                    ? '<span class="badge bg-success">+' + m.today_new + '</span>'
-                    : '<span class="text-muted">0</span>') + '</td>' +
         '<td>' + esc(q) + '</td>' +
         '<td class="text-nowrap">' +
           '<a class="btn btn-sm btn-outline-primary" href="' + sogoLogin(m.username) + '">以该邮箱进 Webmail</a> ' +

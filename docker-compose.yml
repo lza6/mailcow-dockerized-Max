@@ -335,6 +335,12 @@ services:
         ofelia.job-exec.dovecot_imapsync_runner.command: "/bin/bash -c \"[[ $${MASTER} == y ]] && /usr/local/bin/gosu nobody /usr/local/bin/imapsync_runner.pl || exit 0\""
         ofelia.job-exec.dovecot_trim_logs.schedule: "0 * * * * *"
         ofelia.job-exec.dovecot_trim_logs.command: "/bin/bash -c \"[[ $${MASTER} == y ]] && /usr/local/bin/gosu vmail /usr/local/bin/trim_logs.sh || exit 0\""
+        # 采集每个邮箱「最近一封收信时间 / 今日收信数」写进 mailbox_mailstats，供总览页展示。
+        # 放在 dovecot 容器里跑是因为邮件数据在 vmail 卷 —— 刻意不把该卷挂进 php-fpm
+        # （那等于把全站邮件暴露给 Web 应用），Web 侧只读聚合表。
+        ofelia.job-exec.dovecot_mailstats.schedule: "0 */10 * * * *"
+        ofelia.job-exec.dovecot_mailstats.no-overlap: "true"
+        ofelia.job-exec.dovecot_mailstats.command: "/bin/bash /etc/dovecot/mailstats.sh"
         ofelia.job-exec.dovecot_quarantine.schedule: "0 */20 * * * *"
         ofelia.job-exec.dovecot_quarantine.command: "/bin/bash -c \"[[ $${MASTER} == y ]] && /usr/local/bin/gosu vmail /usr/local/bin/quarantine_notify.py || exit 0\""
         ofelia.job-exec.dovecot_clean_q_aged.schedule: "0 0 0 * * *"

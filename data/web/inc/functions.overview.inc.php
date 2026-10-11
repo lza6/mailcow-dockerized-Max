@@ -514,6 +514,20 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
     );
   }
 
+  // ---- 每个邮箱的收信统计（由 dovecot 侧的 mailstats.sh 定时采集，Web 只读）----
+  // 表可能还没被 cron 填过 → 全部为 null，界面显示「—」，不报错。
+  $mailStats = array();
+  try {
+    foreach ($pdo->query("SELECT `username`, `last_received`, `today_received`, `checked_at`
+                            FROM `mailbox_mailstats`")->fetchAll(PDO::FETCH_ASSOC) as $x) {
+      $mailStats[$x['username']] = array(
+        'last_received'  => (string)$x['last_received'],
+        'today_received' => (int)$x['today_received'],
+        'checked_at'     => (string)$x['checked_at'],
+      );
+    }
+  } catch (Exception $e) {}
+
   // ---- 每个发件邮箱最近一次养号发送（用于邮箱列表展示）----
   // 注意：这是**养号邮件**的最近时间，不是「该邮箱收到的最后一封信」。
   // 后者需要访问邮件存储（vmail 卷）或 doveadm，出于安全本容器两者都没有
@@ -552,6 +566,9 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       'relay_acct'=> isset($relayAcct[$m['domain']]) ? $relayAcct[$m['domain']] : null,
       // 该邮箱作为发件人的最近一次养号发送（没有计划则为 null）
       'last_warmup' => isset($lastWu[$u]) ? $lastWu[$u] : null,
+      // 真实收信统计（dovecot 侧采集）。未采集到为 null，前端显示「—」
+      'last_received'  => isset($mailStats[$u]) ? $mailStats[$u]['last_received'] : null,
+      'today_received' => isset($mailStats[$u]) ? $mailStats[$u]['today_received'] : null,
     );
   }
 

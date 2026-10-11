@@ -8,7 +8,7 @@ function init_db_schema()
   //    init_db_schema() 在 `versions.db_schema` 与本值相等时**直接 return**，
   //    不会执行下面的表结构差异 —— 忘了改的话新表永远不会被建出来，
   //    而且不报错（业务侧只会静默写不进数据）。
-  //    $db_version = "11102026_0100";
+  //    $db_version = "12102026_0100";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
@@ -376,6 +376,20 @@ function init_db_schema()
           // 缺这条索引就是聚簇索引全扫（每邮箱每天 +1 行，且只增不减）。
           "key" => array(
             "day" => array("day")
+          )
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      "mailbox_mailstats" => array(
+        "cols" => array(
+          "username" => "VARCHAR(255) NOT NULL",
+          "last_received" => "DATETIME(0) NULL DEFAULT NULL",
+          "today_received" => "INT NOT NULL DEFAULT '0'",
+          "checked_at" => "DATETIME(0) NOT NULL DEFAULT NOW(0)"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("username")
           )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
