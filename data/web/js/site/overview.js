@@ -47,6 +47,43 @@ $(document).ready(function () {
     return ok ? '<span class="badge bg-success">' + esc(label) + '</span>'
               : '<span class="badge bg-danger">' + esc(label) + '</span>';
   }
+  /* ------------------------------------------------------------------ *
+   * ⚠️ 为什么需要一个 body() 包装，而不是直接 $('#ov_xxx_body')
+   *
+   * mailcow 的 footer.js（随主题一起打包）里有一条**全局**规则：
+   *     $('tbody').filter(function(){ return $(this).children().length < 1; }).remove();
+   * 它在页面解析阶段就执行，会把所有**空的 tbody 直接删掉**。
+   *
+   * 本页是「服务端内联数据 + 前端填表」，tbody 天然是空的 —— 于是整张表的
+   * 容器被删掉，JS 再 .html() 也写不进任何东西。症状很有迷惑性：
+   * 顶部统计卡（div）正常显示「16 个域名」，但下面所有列表全空。
+   *
+   * 两层防护：
+   *   1) 模板里每个 tbody 都放了占位行（非空 → 不会被那条规则删）；
+   *   2) 这里再兜一层：万一容器真的没了，就用同表的 <table> 重建一个 tbody。
+   * 只做第 1 层也能工作，但第 2 层能保证以后有人改模板时不会再踩同一个坑。
+   * ------------------------------------------------------------------ */
+  function body(sel, tableSel) {
+    var $b = $(sel);
+    if ($b.length) { return $b; }
+    var $t = $(tableSel);
+    if (!$t.length) { return $b; }              // 连表都没有，交给调用方静默失败
+    $b = $('<tbody>').attr('id', String(sel).replace(/^#/, ''));
+    $t.append($b);
+    return $b;
+  }
+
+  // 出站中继展示：优先显示**号池账号名**，主机名放小字；
+  // 只配了中继但没进号池时退化为显示主机名；两者都没有就是直发。
+  function relayCell(acct, host) {
+    if (acct && acct.label) {
+      return '<span class="badge bg-primary">' + esc(acct.label) + '</span>' +
+             (host ? '<div><small class="text-muted">' + esc(host) + '</small></div>' : '');
+    }
+    if (host) { return '<code class="small">' + esc(host) + '</code>'; }
+    return '<span class="text-muted">直发</span>';
+  }
+
   function fmtAge(d) {
     if (d === null || d === undefined) { return '<span class="text-muted">未知</span>'; }
     if (d >= 365) { return '<span class="text-success">' + (d / 365).toFixed(1) + ' 年</span>'; }
@@ -67,7 +104,7 @@ $(document).ready(function () {
 
   function renderDomains(rows) {
     if (!rows.length) {
-      $('#ov_domains_body').html('<tr><td colspan="8" class="text-center text-muted py-4">暂无域名</td></tr>');
+      body('#ov_domains_body', '#ov_tbl_domains').html('<tr><td colspan="8" class="text-center text-muted py-4">暂无域名</td></tr>');
       return;
     }
     var h = '';
@@ -104,7 +141,7 @@ $(document).ready(function () {
         '<td>' + mxCell + '</td>' +
         '<td>' + auth + '</td>' +
         '<td>' + d.messages + ' <small class="text-muted">封</small></td>' +
-        '<td>' + (d.relay ? '<code>' + esc(d.relay) + '</code>' : '<span class="text-muted">直发</span>') + '</td>' +
+        '<td>' + relayCell(d.relay_acct, d.relay) + '</td>' +
         '<td>' + wu + '</td>' +
         '<td class="text-nowrap">' +
           '<button class="btn btn-sm btn-outline-primary ov_check" data-domain="' + esc(d.domain) + '">体检</button> ' +
@@ -112,24 +149,30 @@ $(document).ready(function () {
         '</td>' +
       '</tr>';
     });
-    $('#ov_domains_body').html(h);
+    body('#ov_domains_body', '#ov_tbl_domains').html(h);
   }
 
   function renderMailboxes(rows) {
     if (!rows.length) {
-      $('#ov_mbox_body').html('<tr><td colspan="7" class="text-center text-muted py-4">暂无邮箱</td></tr>');
+      body('#ov_mbox_body', '#ov_tbl_mbox').html('<tr><td colspan="8" class="text-center text-muted py-4">暂无邮箱</td></tr>');
       return;
     }
     var h = '';
     rows.forEach(function (m) {
       var q = (parseInt(m.quota, 10) === 0) ? '不限' : (Math.round(m.quota / 1048576) + ' MB');
       var used = m.bytes ? (m.bytes / 1048576).toFixed(1) + ' MB' : '0 MB';
-      h += '<tr class="ov_mbox_row" data-search="' + esc((m.username + ' ' + m.domain).toLowerCase()) + '">' +
+      // 出站账号由所属域的绑定决定（mailcow 的中继是域级的），同一域下相同
+      var acct = (m.relay_acct && m.relay_acct.label) ? m.relay_acct.label : '';
+      h += '<tr class="ov_mbox_row" data-search="' +
+             esc((m.username + ' ' + m.domain + ' ' + acct).toLowerCase()) + '">' +
         '<td><code>' + esc(m.username) + '</code></td>' +
         '<td>' + esc(m.domain) + '</td>' +
         '<td>' + (parseInt(m.active, 10) === 1
                     ? '<span class="badge bg-success">启用</span>'
                     : '<span class="badge bg-secondary">停用</span>') + '</td>' +
+        '<td>' + (acct
+                    ? '<span class="badge bg-primary">' + esc(acct) + '</span>'
+                    : '<span class="text-muted">直发</span>') + '</td>' +
         '<td>' + m.messages + ' <small class="text-muted">(' + esc(used) + ')</small></td>' +
         '<td>' + (m.today_new > 0
                     ? '<span class="badge bg-success">+' + m.today_new + '</span>'
@@ -143,7 +186,7 @@ $(document).ready(function () {
         '</td>' +
       '</tr>';
     });
-    $('#ov_mbox_body').html(h);
+    body('#ov_mbox_body', '#ov_tbl_mbox').html(h);
   }
 
   // 明文密钥只在前端缓存里，默认不请求；点了「显示」才向后端要一次（后端会记审计）
@@ -205,7 +248,7 @@ $(document).ready(function () {
             '" data-label="' + esc(a.label) + '">删除</button>' +
         '</td></tr>';
     });
-    $('#ov_pool_body').html(h);
+    body('#ov_pool_body', '#ov_tbl_pool').html(h);
 
     // 绑定表
     var b = '';
@@ -224,7 +267,7 @@ $(document).ready(function () {
         '<td><button class="btn btn-sm btn-outline-danger ov_unbind" data-domain="' + esc(x.domain) + '">解绑</button></td>' +
       '</tr>';
     });
-    $('#ov_bind_body').html(b);
+    body('#ov_bind_body', '#ov_tbl_bind').html(b);
 
     // 绑定表单的两个下拉
     var accSel = $('#ov_bind_account').empty();
@@ -280,7 +323,7 @@ $(document).ready(function () {
           '<button class="btn btn-sm btn-outline-danger ov_wu_del_plan" data-id="' + p.id + '">删除</button>' +
         '</td></tr>';
     });
-    $('#ov_wu_plan_body').html(h);
+    body('#ov_wu_plan_body', '#ov_tbl_wuplan').html(h);
 
     // 收件人
     var r2 = '';
@@ -298,7 +341,7 @@ $(document).ready(function () {
           '<button class="btn btn-sm btn-outline-danger ov_wu_rc_del" data-id="' + x.id + '">删除</button>' +
         '</td></tr>';
     });
-    $('#ov_wu_rc_body').html(r2);
+    body('#ov_wu_rc_body', '#ov_tbl_wurc').html(r2);
 
     // 日志
     var l = '';
@@ -316,12 +359,12 @@ $(document).ready(function () {
         '<td><small class="text-muted">' + esc(det.slice(0, 300)) + '</small></td>' +
       '</tr>';
     });
-    $('#ov_wu_log_body').html(l);
+    body('#ov_wu_log_body', '#ov_tbl_wulog').html(l);
   }
 
   function renderAudit(rows) {
     if (!rows || !rows.length) {
-      $('#ov_audit_body').html('<tr><td colspan="6" class="text-center text-muted py-4">暂无记录</td></tr>');
+      body('#ov_audit_body', '#ov_tbl_audit').html('<tr><td colspan="6" class="text-center text-muted py-4">暂无记录</td></tr>');
       return;
     }
     var h = '';
@@ -336,7 +379,7 @@ $(document).ready(function () {
         '<td><small class="text-muted">' + esc((a.detail || '').slice(0, 120)) + '</small></td>' +
       '</tr>';
     });
-    $('#ov_audit_body').html(h);
+    body('#ov_audit_body', '#ov_tbl_audit').html(h);
   }
 
   // 下拉框：只重建一次选项，避免每次刷新把用户已选的项冲掉
@@ -407,7 +450,7 @@ $(document).ready(function () {
   $(document).on('click', '.ov_goto_mbox', function () {
     var dom = $(this).data('domain');
     $('#ov_mbox_filter').val(dom).trigger('input');
-    $('html,body').animate({ scrollTop: $('#ov_mbox_body').offset().top - 120 }, 250);
+    $('html,body').animate({ scrollTop: body('#ov_mbox_body', '#ov_tbl_mbox').offset().top - 120 }, 250);
   });
 
   $(document).on('click', '.ov_reset_pw', function () {

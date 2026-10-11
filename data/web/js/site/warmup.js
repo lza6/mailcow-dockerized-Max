@@ -25,7 +25,27 @@ $(document).ready(function () {
     }
   }
 
-  function esc(s) {
+      /*
+     * ⚠️ 不能直接用 $('#wu_xxx_body')。
+     *
+     * mailcow 的 footer.js 有一条**全局**规则：
+     *     $('tbody').filter(function(){ return $(this).children().length < 1; }).remove();
+     * 它在页面解析阶段执行，会把所有**空的 tbody 删掉**。本页原本就是
+     * 「tbody 留空、由 JS 填」，于是三个表格的容器全被删，JS 再 .html() 也写不进去
+     * —— 表现为整页数据空白。
+     * 模板里现在放了占位行（非空 → 不会被删）；这里再兜一层：容器没了就按表重建。
+     */
+    function body(sel, tableSel) {
+      var $b = $(sel);
+      if ($b.length) { return $b; }
+      var $t = $(tableSel);
+      if (!$t.length) { return $b; }
+      $b = $('<tbody>').attr('id', String(sel).replace(/^#/, ''));
+      $t.append($b);
+      return $b;
+    }
+
+function esc(s) {
     return $('<div>').text(s === null || s === undefined ? '' : String(s)).html();
   }
 
@@ -77,7 +97,7 @@ $(document).ready(function () {
         ' <button class="btn btn-sm btn-outline-danger wu_del" data-id="' + p.id + '">删除</button></td>' +
         '</tr>';
     });
-    $('#wu_plans_body').html(rows);
+    body('#wu_plans_body', '#wu_plans_table').html(rows);
 
     // ---- 收件人 ----
     var rrows = '';
@@ -94,7 +114,7 @@ $(document).ready(function () {
         '<button class="btn btn-sm btn-outline-danger wu_rcpt_del" data-id="' + r.id + '">删除</button>' +
         '</td></tr>';
     });
-    $('#wu_rcpts_body').html(rrows);
+    body('#wu_rcpts_body', '#wu_rcpts_table').html(rrows);
 
     // ---- 日志 ----
     var lrows = '';
@@ -111,7 +131,7 @@ $(document).ready(function () {
         '<td class="small text-muted">' + esc((l.detail || '').slice(0, 220)) + '</td>' +
         '</tr>';
     });
-    $('#wu_logs_body').html(lrows);
+    body('#wu_logs_body', '#wu_logs_table').html(lrows);
   }
 
   function load() {

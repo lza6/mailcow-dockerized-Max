@@ -1,4 +1,13 @@
 {% extends 'base.twig' %}
+{#
+  ⚠️ 每个 tbody 必须带**占位行**，不能留空。
+  mailcow 的 footer.js 里有一条全局规则：
+      $('tbody').filter(function(){ return $(this).children().length < 1; }).remove();
+  它在解析阶段执行，会把页面上所有**空的 tbody 整个删掉**。
+  本页是「服务端内联数据 + JS 填表」，tbody 一旦留空就会被删，
+  JS 再 .html() 就找不到容器了 —— 表现为统计卡有数字、但所有列表全空。
+  占位行让 tbody 非空从而不被删；JS 渲染时会把占位行整体替换掉。
+#}
 
 {% block content %}
 {# csrf_token 必须注入：本页继承 base.twig 而非 admin.twig #}
@@ -62,7 +71,7 @@
     </div>
     <div class="card-body p-0">
       <div class="table-responsive">
-        <table class="table table-sm table-hover mb-0 align-middle">
+        <table id="ov_tbl_domains" class="table table-sm table-hover mb-0 align-middle">
           <thead class="table-light">
             <tr>
               <th style="width:17%">域名</th>
@@ -75,7 +84,9 @@
               <th style="width:15%">操作</th>
             </tr>
           </thead>
-          <tbody id="ov_domains_body"></tbody>
+          <tbody id="ov_domains_body">
+              <tr><td colspan="8" class="text-center text-muted py-3">正在加载域名…</td></tr>
+            </tbody>
         </table>
       </div>
     </div>
@@ -95,19 +106,22 @@
     </div>
     <div class="card-body p-0">
       <div class="table-responsive" style="max-height:28rem;overflow:auto">
-        <table class="table table-sm table-hover mb-0 align-middle">
+        <table id="ov_tbl_mbox" class="table table-sm table-hover mb-0 align-middle">
           <thead class="table-light" style="position:sticky;top:0">
             <tr>
-              <th style="width:26%">邮箱</th>
-              <th style="width:15%">所属域</th>
-              <th style="width:8%">状态</th>
-              <th style="width:11%">邮件数</th>
-              <th style="width:8%">今日新增</th>
-              <th style="width:10%">配额</th>
-              <th style="width:22%">操作</th>
+              <th style="width:24%">邮箱</th>
+              <th style="width:13%">所属域</th>
+              <th style="width:7%">状态</th>
+              <th style="width:11%">出站账号</th>
+              <th style="width:10%">邮件数</th>
+              <th style="width:7%">今日新增</th>
+              <th style="width:8%">配额</th>
+              <th style="width:20%">操作</th>
             </tr>
           </thead>
-          <tbody id="ov_mbox_body"></tbody>
+          <tbody id="ov_mbox_body">
+              <tr><td colspan="8" class="text-center text-muted py-3">正在加载邮箱…</td></tr>
+            </tbody>
         </table>
       </div>
     </div>
@@ -153,13 +167,15 @@
 
       <!-- 账号表 -->
       <div class="table-responsive mb-3">
-        <table class="table table-sm table-hover align-middle mb-0">
+        <table id="ov_tbl_pool" class="table table-sm table-hover align-middle mb-0">
           <thead class="table-light">
             <tr><th style="width:5%">ID</th><th style="width:16%">标签</th><th style="width:16%">API Key</th>
                 <th style="width:8%">状态</th><th style="width:11%">已绑/上限</th><th style="width:9%">日配额</th>
                 <th style="width:19%">最近校验</th><th style="width:16%">操作</th></tr>
           </thead>
-          <tbody id="ov_pool_body"></tbody>
+          <tbody id="ov_pool_body">
+              <tr><td colspan="8" class="text-center text-muted py-3">正在加载中继账号…</td></tr>
+            </tbody>
         </table>
       </div>
 
@@ -187,12 +203,14 @@
         </div>
       </div>
       <div class="table-responsive">
-        <table class="table table-sm table-hover align-middle mb-0">
+        <table id="ov_tbl_bind" class="table table-sm table-hover align-middle mb-0">
           <thead class="table-light">
             <tr><th style="width:26%">域名</th><th style="width:20%">所属账号</th><th style="width:14%">Resend 状态</th>
                 <th style="width:20%">验证通过时间</th><th style="width:20%">操作</th></tr>
           </thead>
-          <tbody id="ov_bind_body"></tbody>
+          <tbody id="ov_bind_body">
+              <tr><td colspan="5" class="text-center text-muted py-3">正在加载域名绑定…</td></tr>
+            </tbody>
         </table>
       </div>
 
@@ -226,13 +244,15 @@
 
       <!-- 计划表 -->
       <div class="table-responsive mb-3">
-        <table class="table table-sm table-hover align-middle mb-0">
+        <table id="ov_tbl_wuplan" class="table table-sm table-hover align-middle mb-0">
           <thead class="table-light">
             <tr><th style="width:20%">发件邮箱</th><th style="width:9%">进度</th><th style="width:11%">今日配额/已发</th>
                 <th style="width:9%">累计</th><th style="width:17%">状态</th><th style="width:14%">最后运行</th>
                 <th style="width:20%">操作</th></tr>
           </thead>
-          <tbody id="ov_wu_plan_body"></tbody>
+          <tbody id="ov_wu_plan_body">
+              <tr><td colspan="7" class="text-center text-muted py-3">正在加载养号计划…</td></tr>
+            </tbody>
         </table>
       </div>
 
@@ -267,11 +287,13 @@
         </div>
       </div>
       <div class="table-responsive mb-4">
-        <table class="table table-sm align-middle mb-0">
+        <table id="ov_tbl_wurc" class="table table-sm align-middle mb-0">
           <thead class="table-light"><tr>
             <th style="width:34%">收件地址</th><th style="width:22%">备注</th>
             <th style="width:14%">状态</th><th style="width:30%">操作</th></tr></thead>
-          <tbody id="ov_wu_rc_body"></tbody>
+          <tbody id="ov_wu_rc_body">
+              <tr><td colspan="4" class="text-center text-muted py-3">正在加载收件人…</td></tr>
+            </tbody>
         </table>
       </div>
 
@@ -281,12 +303,14 @@
         <span class="text-muted small">每封发给了谁、结果如何</span>
       </div>
       <div class="table-responsive" style="max-height:22rem;overflow:auto">
-        <table class="table table-sm table-hover align-middle mb-0">
+        <table id="ov_tbl_wulog" class="table table-sm table-hover align-middle mb-0">
           <thead class="table-light" style="position:sticky;top:0"><tr>
             <th style="width:17%">时间</th><th style="width:22%">发件邮箱</th>
             <th style="width:9%">计划</th><th style="width:9%">实发</th><th style="width:9%">失败</th>
             <th style="width:34%">详情（收件人 / 结果）</th></tr></thead>
-          <tbody id="ov_wu_log_body"></tbody>
+          <tbody id="ov_wu_log_body">
+              <tr><td colspan="6" class="text-center text-muted py-3">正在加载发送日志…</td></tr>
+            </tbody>
         </table>
       </div>
 
@@ -367,7 +391,7 @@
     </div>
     <div class="card-body p-0">
       <div class="table-responsive" style="max-height:22rem;overflow:auto">
-        <table class="table table-sm table-hover mb-0 align-middle">
+        <table id="ov_tbl_audit" class="table table-sm table-hover mb-0 align-middle">
           <thead class="table-light" style="position:sticky;top:0">
             <tr>
               <th style="width:18%">时间</th>
@@ -378,7 +402,9 @@
               <th style="width:18%">详情</th>
             </tr>
           </thead>
-          <tbody id="ov_audit_body"></tbody>
+          <tbody id="ov_audit_body">
+              <tr><td colspan="6" class="text-center text-muted py-3">正在加载审计记录…</td></tr>
+            </tbody>
         </table>
       </div>
     </div>

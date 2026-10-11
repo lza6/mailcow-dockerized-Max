@@ -354,6 +354,25 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       ORDER BY d.`domain` ASC"
   )->fetchAll(PDO::FETCH_ASSOC);
 
+  // ---- 域名 → 号池账号（Resend）映射 ----
+  // 单独查一次再在 PHP 里合并，而不是给上面的主查询加 JOIN：
+  //   · 主查询是页面的骨架，加 JOIN 后若号池表异常会整页挂掉；
+  //   · resend_domains.domain 上有索引，这一条本身很便宜。
+  $relayAcct = array();
+  try {
+    foreach ($pdo->query(
+      "SELECT rd.`domain`, rd.`status`, ra.`id` AS `aid`, ra.`label`
+         FROM `resend_domains` rd
+         LEFT JOIN `resend_accounts` ra ON ra.`id` = rd.`account_id`"
+    )->fetchAll(PDO::FETCH_ASSOC) as $x) {
+      $relayAcct[$x['domain']] = array(
+        'id'     => (int)$x['aid'],
+        'label'  => (string)$x['label'],
+        'status' => (string)$x['status'],
+      );
+    }
+  } catch (Exception $e) {}
+
   // ---- 邮箱数（按域）----
   $mboxCnt = array();
   foreach ($pdo->query("SELECT `domain`, COUNT(*) AS n FROM `mailbox` GROUP BY `domain`")->fetchAll(PDO::FETCH_ASSOC) as $x) {
@@ -429,6 +448,8 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       'active'     => (int)$d['active'],
       'created'    => $d['created'],
       'relay'      => ($d['relay_host'] === null ? '' : $d['relay_host']),
+      // 出站走的是哪个号池账号（域名未绑号池时为 null，前端显示「直发」）
+      'relay_acct' => isset($relayAcct[$d['domain']]) ? $relayAcct[$d['domain']] : null,
       'mailboxes'  => isset($mboxCnt[$d['domain']]) ? $mboxCnt[$d['domain']] : 0,
       'messages'   => isset($msgByDom[$d['domain']]) ? $msgByDom[$d['domain']] : 0,
       'age_days'   => ov_domain_age_days($redis, $d['domain'], $ageCacheOnly),
@@ -464,6 +485,9 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       'messages'  => $cur,
       'today_new' => max(0, $cur - $b),
       'bytes'     => isset($quotas[$u]) ? $quotas[$u]['bytes'] : 0,
+      // 该邮箱的出站走哪个号池账号 —— 由**所属域**的绑定决定（mailcow 的中继
+      // 是域级的，不是邮箱级），所以同一域下的邮箱拿到的值相同。
+      'relay_acct'=> isset($relayAcct[$m['domain']]) ? $relayAcct[$m['domain']] : null,
     );
   }
 

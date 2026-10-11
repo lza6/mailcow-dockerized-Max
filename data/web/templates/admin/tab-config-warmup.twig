@@ -1,3 +1,9 @@
+{#
+  ⚠️ tbody 不能留空：mailcow 的 footer.js 有一条全局规则
+      $('tbody').filter(function(){ return $(this).children().length < 1; }).remove();
+  它在解析阶段就把所有空 tbody 删掉，导致 JS 再也填不进内容（表格永远空白）。
+  这里放占位行让 tbody 非空，JS 渲染时会整体替换掉。
+#}
 <div class="tab-pane fade" id="tab-config-warmup" role="tabpanel" aria-labelledby="tab-config-warmup">
   <div class="card mb-4">
     <div class="card-header d-flex fs-5">
@@ -52,7 +58,9 @@
               <th style="width:11%">操作</th>
             </tr>
           </thead>
-          <tbody id="wu_plans_body"></tbody>
+          <tbody id="wu_plans_body">
+              <tr><td colspan="8" class="text-center text-muted py-3">正在加载养号计划…</td></tr>
+            </tbody>
         </table>
       </div>
 
@@ -117,7 +125,9 @@
               <th style="width:15%">操作</th>
             </tr>
           </thead>
-          <tbody id="wu_rcpts_body"></tbody>
+          <tbody id="wu_rcpts_body">
+              <tr><td colspan="4" class="text-center text-muted py-3">正在加载收件人…</td></tr>
+            </tbody>
         </table>
       </div>
 
@@ -135,7 +145,9 @@
               <th style="width:32%">明细</th>
             </tr>
           </thead>
-          <tbody id="wu_logs_body"></tbody>
+          <tbody id="wu_logs_body">
+              <tr><td colspan="6" class="text-center text-muted py-3">正在加载发送日志…</td></tr>
+            </tbody>
         </table>
       </div>
 
