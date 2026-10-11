@@ -67,6 +67,8 @@
 | CSRF 加固回归 | 2026-10-11 | 伪造→403 / 缺 token→403 / GET→405 / 合法→成功 | 改 `sessions` 相关或端点入口后 |
 | 凭据保管箱 | 2026-10-11 | 往返正确 + 篡改检测生效 | 改 `functions.secretbox.inc.php` 后 |
 | 并发写压测 | 2026-07b-cn.5 | 600 次 0 失败 0 死锁 | 改 `ov_write()` 或 mailbox 写路径后 |
+| **养号互动链路真实 E2E** | 2026-07b-cn.8 | 发信2→判定inbox→检出spam→救援→自动回复，全通 | 改 `functions.warmup_ext.inc.php` / `warmup_interact` / cron 后 |
+| 顶部指标渲染 | 2026-07b-cn.9 | 10 个指标全部有值 | 改 `overview.twig` / `renderStats` 后 |
 | 只读压测 | 2026-07b-cn.4 | 1950 请求 0 失败，峰值 ~123 RPS | 改 `overview_build()` 或加首屏网络 I/O 后 |
 | 数据库索引 | 2026-07b-cn.5 | `overview_mbox_daily.day`、`warmup_log.plan_run` 已建 | 改 `init_db.inc.php` 后 |
 

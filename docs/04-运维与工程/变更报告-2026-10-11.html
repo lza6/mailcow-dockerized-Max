@@ -258,11 +258,83 @@
   <tr><td>Google Postmaster 信誉分</td><td><span class="tag blocked">blocked</span></td><td>需用户本人 Google 账号 OAuth 授权</td></tr>
 </table>
 
+<h2>七、追加：用本机受控收件人把互动链路真跑了一遍</h2>
+
+<p class="lede">
+  光有代码不算数 —— 拿 <code>pony-it.com</code> 上一个受控探针邮箱当收件人，
+  把「判定进箱 → 检出垃圾箱 → 救援 → 自动回复」整条链路真跑了一遍。
+</p>
+
+<div class="card good">
+  <h3>真实 E2E 结果（生产实测，非 mock）</h3>
+<pre>发信        run_now -> sent=2 failed=0；探针邮箱邮件数 0 -> 2
+逐封留痕    warmup_messages 首次真实写入，含 Message-ID
+判定投递    check_deliveries -> checked=1 inbox=1     DB result=inbox
+模拟垃圾箱  doveadm move 到 Junk；系统自行检出 -> checked=1 spam=1   DB result=spam
+垃圾箱救援  Junk 邮件数 1 -> 0，INBOX 1 -> 2
+自动回复    run_interact -> replied=1；发件人 daniel 收件数 9 -> 10
+最终统计    进箱率 100% / 垃圾箱率 0%；收件人 进箱1 垃圾箱1 回复2</pre>
+</div>
+
+<h3>这一跑，跑出了 5 个真 bug</h3>
+<table>
+  <tr><th>#</th><th>问题</th><th>为什么会错</th></tr>
+  <tr><td>B1</td><td><code>LATT_SPAM</code> 常量在 PHP 里不存在</td>
+      <td>PHP 的 imap 扩展只定义 7 个 <code>LATT_*</code>，<b>没有 <code>LATT_SPAM</code></b> →
+          PHP 8 下直接致命错误。即 PHP 不暴露 IMAP SPECIAL-USE 属性</td></tr>
+  <tr><td>B2</td><td>文件夹列举传了空 reference</td>
+      <td><code>imap_getmailboxes($conn,'','*')</code> 实测直接返回 <code>false</code></td></tr>
+  <tr><td>B3</td><td><b><code>imap_reopen($conn,'INBOX')</code> 裸名会静默开错邮箱</b></td>
+      <td>裸名返回 true，但那是<b>另一个邮箱</b>（1 封）；带前缀才是真 INBOX（2 封）。
+          后果：收件箱那级<b>永远找不到邮件</b>，而垃圾箱那级因为传了完整名所以能命中
+          —— 看起来像"只有垃圾箱检测坏了"</td></tr>
+  <tr><td>B4</td><td><code>HEADER</code> 搜索本机 Dovecot 不支持，<code>TEXT</code> 也不可靠</td>
+      <td><code>HEADER Message-ID "…"</code> → <code>Unknown search criterion: HEADER</code>；
+          <code>TEXT</code> 对 Junk 里的能命中、对 INBOX 里的另一封却命中不到</td></tr>
+  <tr><td>B5</td><td>AJAX 的 overview 少返回 <code>messages</code></td>
+      <td>首屏有逐封明细，一点「刷新」那张表就变空</td></tr>
+</table>
+
+<p>
+  <b>修法（B3/B4 合起来就是一条原则）</b>：查找改成
+  <b>三级尝试</b>（<code>HEADER</code> → <code>TEXT</code> → <code>SINCE</code> 逐封比对）＋
+  <b>无论哪级命中都读回 Message-ID 头做精确比对</b>，
+  并且一律使用<b>带前缀的完整邮箱名</b>。<code>$ref</code> 改成必填参数防止再漏传。
+</p>
+
+<div class="card warn">
+  <h3>一个必须说清的边界</h3>
+  <p>
+    探针走的是<b>同机投递</b>，<b>不经过真实的垃圾邮件判定</b> ——
+    所以上面那个「进箱率 100%」<b>不能用来评估真实投递效果</b>，
+    它只证明"机械是对的"。真实进箱率仍需填入外部（Gmail）账号的
+    应用专用密码后慢慢积累。
+  </p>
+</div>
+
+<h2>八、还没做的（诚实清单，续）</h2>
+<table>
+  <tr><th>项</th><th>状态</th><th>原因</th></tr>
+  <tr><td>邮箱「最近收信时间」</td><td><span class="tag blocked">blocked</span></td>
+      <td>需要访问邮件存储。vmail 卷<b>故意没挂进 Web 容器</b>（安全设计）；
+          dockerapi 的 exec <b>只派发预定义方法</b>，不提供任意命令执行。
+          现只提供「最近<b>养号</b>发送时间」，已在页面「数据来源」条注明</td></tr>
+  <tr><td>邮箱级改绑 re 账号</td><td><span class="tag todo">todo</span></td>
+      <td>mailcow 中继是<b>域级</b>的，邮箱级覆盖需要新表</td></tr>
+  <tr><td>Spec Kit / agent-skills 安装</td><td><span class="tag todo">todo</span></td>
+      <td>本地有 <code>042-planning-openspec</code> 类技能；未从 GitHub 安装 spec-kit</td></tr>
+  <tr><td>独立审查线程循环</td><td><span class="tag todo">todo</span></td>
+      <td>上一轮的两个 Critic 已给结论并修复；本轮未再起新审查线程</td></tr>
+  <tr><td>把项目整理成 workflow + skills / SOP 文档</td><td><span class="tag todo">todo</span></td><td>—</td></tr>
+  <tr><td>高并发基础设施（LB / CDN / 队列 / 限流 / 熔断 / 可观测性）</td><td><span class="tag todo">todo</span></td>
+      <td>已压测并知道天花板是 <code>pm.max_children=50</code></td></tr>
+</table>
+
 <!-- =================== 测验 =================== -->
 <section class="quiz">
   <div class="kicker">必须通过</div>
   <h2 style="margin-top:6px">变更测验</h2>
-  <p class="sub">全部答对才算通过。选错会有解释。</p>
+  <p class="sub">共 12 题，全部答对才算通过。选错会有解释。</p>
 
   <div class="q" data-a="b">
     <div class="stem">1. 后台页面的表格全部空白，但响应体 HTML 里元素 ID 齐全、内联 JSON 有 16 个域名。最可能的原因是什么？</div>
@@ -346,6 +418,26 @@
     <div class="why">这次的根因隐藏了足够久，正因为最开始把"响应体里有元素 ID"当成了"页面正常"。</div>
   </div>
 
+  <div class="q" data-a="c">
+    <div class="stem">11. `imap_reopen($conn, 'INBOX')` 用**裸名字**会怎样？</div>
+    <label><input type="radio" name="q11" value="a"> 抛异常</label>
+    <label><input type="radio" name="q11" value="b"> 正常回到 INBOX</label>
+    <label><input type="radio" name="q11" value="c"> 返回 true，但开的是**另一个邮箱**——于是收件箱那级永远找不到邮件，
+      而垃圾箱那级因为传了带前缀的完整名所以能命中，看起来像"只有垃圾箱坏了"</label>
+    <div class="why">所以查找必须一律用带前缀的完整邮箱名（<code>{host:993/imap/ssl/novalidate-cert}INBOX</code>）。</div>
+  </div>
+
+  <div class="q" data-a="b">
+    <div class="stem">12. 为什么「按 Message-ID 找邮件」要做成**三级尝试 + 读头精确比对**？</div>
+    <label><input type="radio" name="q12" value="a"> 为了显得严谨</label>
+    <label><input type="radio" name="q12" value="b"> 因为 <code>HEADER</code> 不是所有服务器都支持、<code>TEXT</code> 也不可靠，
+      所以要有不依赖搜索语义的兜底；同时必须读回 Message-ID 头核对，
+      否则会被正文里恰好包含同样字符串的邮件骗到</label>
+    <label><input type="radio" name="q12" value="c"> 因为 IMAP 协议要求</label>
+    <div class="why">实测：本机 Dovecot 对 <code>HEADER</code> 直接报 <code>Unknown search criterion</code>；
+    <code>TEXT</code> 对 Junk 里的能命中、对 INBOX 里的却命中不到。</div>
+  </div>
+
   <button id="submit">提交答卷</button>
   <button id="reset" class="ghost" style="margin-left:8px">重做</button>
   <div id="verdict"></div>
@@ -392,7 +484,7 @@
     }
     if (wrong === 0) {
       v.className = 'pass';
-      v.textContent = '✓ 通过（10/10）。你已经掌握这次变更的关键判断。';
+      v.textContent = '✓ 通过（' + qs.length + '/' + qs.length + '）。你已经掌握这次变更的关键判断。';
     } else {
       v.className = 'fail';
       v.textContent = '✗ 未通过：答错 ' + wrong + ' 题。请阅读上方红色解释后重做。';
