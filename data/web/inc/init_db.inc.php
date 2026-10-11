@@ -4,7 +4,11 @@ function init_db_schema()
   try {
     global $pdo;
 
-    $db_version = "10102026_2200";
+    // ⚠️ 新增/修改表定义后**必须**改这个版本号：
+  //    init_db_schema() 在 `versions.db_schema` 与本值相等时**直接 return**，
+  //    不会执行下面的表结构差异 —— 忘了改的话新表永远不会被建出来，
+  //    而且不报错（业务侧只会静默写不进数据）。
+  //    $db_version = "11102026_0100";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
