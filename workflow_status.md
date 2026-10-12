@@ -5,9 +5,25 @@
 
 - 生产环境：`15.204.205.80` / `mail.pony-it.com`
 - 目标仓库：`https://github.com/lza6/mailcow-dockerized-Max`（分支 `main`）
-- 本文件最后一次更新：2026-10-12（收尾轮 + 三个上线级缺陷修复）
-- **已推送**：远端 `main` = `d2902650f`，tag `v2026.07b-cn.13`（快进推送，非 force）
+- 本文件最后一次更新：2026-10-12（收尾轮 + 三个上线级缺陷修复 + **号池扩容并已热更新到生产**）
+- **已推送**：远端 `main` = `a059f7137`，tag `v2026.07b-cn.13`（快进推送，非 force）
 - 本轮规格：`.specify/specs/001-final-closure/spec.md`　变更报告：`docs/04-运维与工程/变更报告-2026-10-12.html`
+- **生产热更新**：`functions.resend_pool.inc.php` 与 `init_db.inc.php` 已通过 `docker cp` 部署并重启 php-fpm（部署前均有 `/tmp/*.bak_<时间戳>` 备份）
+
+---
+
+## 生产号池现状（2026-10-12 实测）
+
+| 项 | 值 |
+|---|---|
+| 号池账号 | **5 个**（`Resend-账号1`..`5`），均 active、日配额 100 |
+| 已绑域 | **13 个**（3 verified + 10 pending） |
+| 单账号容量 | **3**（`RESEND_DOMAIN_LIMIT_DEFAULT`；同时受 Resend 套餐硬限制，实测 5 个账号**每个都是 3**） |
+| 中继 | 每个账号一条 `smtp.resend.com:587`（username = `resend#1`..`resend#5`，按账号隔离 SASL） |
+| 待迁 | `summitnestretail.com`、`trendhollowretail.com` 仍走 `cf-bridge:2526` —— **Resend 免费套餐域上限已满**（5×3=15，已用 13+2 试图新增被拒） |
+
+> 新增域被拒的原文：`You have reached the domain limit of your plan. Upgrade to add more.`
+> 这是 **Resend 账号套餐的真实配额**，不是代码缺陷。要扩容只能：升级套餐 / 再开账号 / 释放不用的域。
 
 ---
 
@@ -54,6 +70,9 @@
 | R35 | 号池绑定域名不再 500 | `functions.resend_pool.inc.php:387`（补 `global $pdo`） | **done** | 探针证实 `null->prepare()` 抛 `Error`、`catch (Exception)` 接不住 | **待真实点一次「绑定」复验**（会调 Resend/CF 计费接口） |
 | R36 | 号池写动作必须 POST + CSRF | `inc/ajax/resend_pool.php:40-73` | **done** | 四态实测：GET→405 / 无 token→403 / `$_POST` 被清空→403 / 正常→放行 | — |
 | R37 | `check_all` 的 redis 锁原子化 | `inc/ajax/overview.php:346` | done | 真实 redis 实测 SET NX EX：首次 true(ttl=20)、再次 false | — |
+| R38 | 号池扩容到 5 账号 / 13 域 | `resend_accounts` / `resend_domains` / `relayhosts` | **done** | **生产实测**：5 账号 active、13 域入库、每账号一条 `resend#N` 中继；UI 端点 `mode=status` 复读一致 | `summitnestretail.com` / `trendhollowretail.com` 受 Resend 套餐上限未绑 |
+| R39 | 生产 `$db_version` 修复 | `init_db.inc.php`（生产热更新） | **done** | **生产实测**：修复前库里 `db_schema` 为**空值**、修复后为 `12102026_0100`；备份在 `/tmp/init_db.inc.php.bak_*` | — |
+| R40 | 生产 `resend_pool_write_dns` 的 `$pdo` 修复 | `functions.resend_pool.inc.php`（生产热更新） | **done** | **生产实测**：修复前 md5 `7ae558c…`（`global $redis;`），修复后 `97699c7…`（`global $pdo, $redis;`）；随后 12 域分配成功 10 个（另 2 个是套餐上限） | — |
 
 ---
 
