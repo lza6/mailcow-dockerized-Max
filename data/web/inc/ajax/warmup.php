@@ -30,7 +30,7 @@ $is_api_session = isset($_SESSION['mailcow_cc_api']) && $_SESSION['mailcow_cc_ap
 $action = isset($_REQUEST['action']) ? (string)$_REQUEST['action'] : '';
 
 $write_actions = array(
-  'add_plan', 'edit_plan', 'delete_plan', 'set_status', 'run_now',
+  'add_plan', 'edit_plan', 'delete_plan', 'set_status', 'set_status_all', 'run_now',
   'add_recipient', 'delete_recipient', 'toggle_recipient',
   'verify_recipient', 'edit_recipient', 'check_deliveries', 'run_interact',
   'add_plans_for_all',
@@ -225,6 +225,27 @@ try {
       $stmt->execute(array(':s' => $status, ':id' => $id));
       audit_log($pdo, 'warmup.plan_status', 'warmup_plan', (string)$id, 'ok', 'status='.$status);
       wu_json(array('ok' => true));
+    }
+
+    // ============ 一键全部开关（影响面大，必须留痕）============
+    // 用途：出问题时需要**立刻**让所有域停止发信（例如发现投递变差、
+    // 或某个域被投诉）。逐个点太慢，且容易漏。
+    // 只动 `active` / `paused` 两种状态；`finished`（已到期）不动 ——
+    // 把已结束的计划"启用"回来是没意义的，反而会让它重新开始发。
+    case 'set_status_all': {
+      $status = wu_post('status');
+      if (!in_array($status, array('active', 'paused'), true)) {
+        wu_json(array('ok' => false, 'message' => 'invalid status'));
+      }
+      $stmt = $pdo->prepare("UPDATE `warmup_plans`
+                                SET `status` = :s, `pause_reason` = ''
+                              WHERE `status` IN ('active','paused')");
+      $stmt->execute(array(':s' => $status));
+      $n = $stmt->rowCount();
+      audit_log($pdo, 'warmup.plan_status_all', 'warmup', '*', 'ok',
+                'status=' . $status . ' affected=' . $n);
+      wu_json(array('ok' => true, 'affected' => $n,
+                    'message' => ($status === 'paused' ? '已暂停' : '已启用') . ' ' . $n . ' 个计划'));
     }
 
     case 'delete_plan': {

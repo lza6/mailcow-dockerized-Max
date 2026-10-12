@@ -169,6 +169,22 @@ function esc(s) {
       .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); });
   });
 
+  // 一键全部暂停 / 启用。
+  // 暂停要二次确认 —— 它会立刻停掉所有域的发信，属于影响面最大的动作之一。
+  $('#wu_pause_all').on('click', function () {
+    if (!confirm('确定暂停**全部**养号计划？所有域将立即停止发信（已结束的计划不受影响）。')) { return; }
+    post({ action: 'set_status_all', status: 'paused' })
+      .done(function (d) { notice(d.message || (d.ok ? '已全部暂停' : '操作失败'), !d.ok); if (d.ok) { load(); } })
+      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); });
+  });
+
+  $('#wu_resume_all').on('click', function () {
+    if (!confirm('确定重新启用全部已暂停的养号计划？')) { return; }
+    post({ action: 'set_status_all', status: 'active' })
+      .done(function (d) { notice(d.message || (d.ok ? '已全部启用' : '操作失败'), !d.ok); if (d.ok) { load(); } })
+      .fail(function (x) { notice('请求失败（HTTP ' + x.status + '）', true); });
+  });
+
   $(document).on('click', '.wu_del', function () {
     if (!confirm('确定删除该计划？历史日志会保留。')) { return; }
     post({ action: 'delete_plan', id: $(this).data('id') })

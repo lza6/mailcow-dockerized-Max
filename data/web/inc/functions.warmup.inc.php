@@ -19,6 +19,13 @@
 
 // 单次运行最多发几封（防止一次 cron 触发猛发）
 define('WARMUP_MAX_PER_RUN', 3);
+// **错开发送**：同一个计划两次发送之间至少间隔这么多秒，且每次运行**最多发 1 封**。
+// 原实现是「到了当日随机时刻，就一口气把当日配额全发掉」——2~3 封同一秒出去：
+//   · 不像真人（真人不会同一秒给同一收件人连发）
+//   · 「进箱 / 垃圾箱」的观测全部挤在同一时刻，样本没有时间分布，
+//     看不出"某个时间点之后投递变差"这类真实趋势
+// 加上这道闸之后，cron 每 5 分钟一跑，配合本间隔 = 自然摊到一天里。
+define('WARMUP_MIN_GAP_SEC', 600);
 // 全局每日发送总量上限（跨所有计划，兜底防配置错误）
 define('WARMUP_GLOBAL_DAILY_CAP', 30);
 // 失败率阈值与最小样本（达到后才判定）
@@ -148,6 +155,22 @@ function warmup_is_expired($plan) {
 function warmup_sent_today_total($pdo) {
   $stmt = $pdo->query("SELECT COALESCE(SUM(`sent`),0) FROM `warmup_log` WHERE `run_date` = CURDATE()");
   return (int)$stmt->fetchColumn();
+}
+
+/**
+ * 某计划**最近一次成功发送**的时间戳（0 = 今天还没发过）。
+ * 用于「错开发送」的间隔判断：以逐封落库的 warmup_messages 为准，
+ * 而不是 warmup_log（后者是按次汇总，一次运行可能包含多封）。
+ *
+ * ⚠️ 时间列是 **`sent_at`**（不是 `created`）。写错列名会直接抛 SQL 错误，
+ *    让整轮养号崩掉 —— 而这里的失败是"跑不起来"，不是"少发几封"。
+ */
+function warmup_last_sent_ts($pdo, $planId) {
+  $st = $pdo->prepare("SELECT UNIX_TIMESTAMP(MAX(`sent_at`))
+                         FROM `warmup_messages`
+                        WHERE `plan_id` = :p AND `send_ok` = 1 AND DATE(`sent_at`) = CURDATE()");
+  $st->execute(array(':p' => (int)$planId));
+  return (int)$st->fetchColumn();
 }
 
 /**
@@ -296,6 +319,17 @@ function warmup_run($pdo, $force = false) {
         warmup_mark_skip($pdo, $plan['id'], '未到今日随机时刻（' . date('H:i', $targetTs) . '）');
         continue;
       }
+      // 错开发送：两次发送之间至少间隔 WARMUP_MIN_GAP_SEC，且每次运行最多 1 封。
+      // 不加这道闸的话，到了当日随机时刻会把配额一口气发完（2~3 封同一秒），
+      // 既不像真人，「进箱/垃圾箱」的样本也全挤在同一时刻、看不出时间趋势。
+      $lastTs = warmup_last_sent_ts($pdo, $plan['id']);
+      if ($lastTs > 0 && (time() - $lastTs) < WARMUP_MIN_GAP_SEC) {
+        $wait = WARMUP_MIN_GAP_SEC - (time() - $lastTs);
+        $result['skipped'][] = $plan['domain'] . ': 距上一封仅 ' . (time() - $lastTs) . 's，等待 ' . $wait . 's';
+        warmup_mark_skip($pdo, $plan['id'], '错开中：距上一封 ' . (time() - $lastTs) . ' 秒，需再等 ' . $wait . ' 秒');
+        continue;
+      }
+      $batch = min($batch, 1);
     }
 
     $sent = 0;

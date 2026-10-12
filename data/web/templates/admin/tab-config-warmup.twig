@@ -44,6 +44,17 @@
 
       <!-- 计划 -->
       <legend>养号计划</legend><hr />
+      <div class="mb-2">
+        <button class="btn btn-sm btn-outline-danger" id="wu_pause_all">
+          <i class="bi bi-pause-circle"></i> 全部暂停
+        </button>
+        <button class="btn btn-sm btn-outline-success ms-1" id="wu_resume_all">
+          <i class="bi bi-play-circle"></i> 全部启用
+        </button>
+        <span class="text-muted small ms-2">
+          出问题时一键停掉所有域的发信（已结束的计划不受影响）。单域开关在下方每行的「暂停/启用」。
+        </span>
+      </div>
       <div class="table-responsive">
         <table class="table table-striped" id="wu_plans_table">
           <thead>
