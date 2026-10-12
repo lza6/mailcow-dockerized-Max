@@ -300,6 +300,16 @@ assert_equals('ok', $c['status'], '只有「查询被拒」时仍判 ok（不当
 assert_true(implode("\n", $c['evidence']) !== '' && strpos(implode("\n", $c['evidence']), 'Spamhaus ZEN') !== false,
     '被拒的名单会出现在证据里（透明化，便于用户自行判断）');
 
+// 取不到出口 IP 时端点传 zones=0。**必须与「查过且干净」区分开** ——
+// 否则会给出一个绿色「正常」徽章，而真相是根本没查（用户会被误导跳过这一项）。
+$c = dhc_check(dhc_build_checks(dhc_fixture([
+    'rbl' => ['listed' => [], 'refused' => [], 'zones' => 0, 'cached' => false],
+])), 'rbl');
+assert_equals('unknown', $c['status'], 'zones=0（未执行查询）判 unknown，不能判 ok');
+assert_true(strpos($c['reason'], '未执行') !== false || strpos($c['reason'], '未查询') !== false,
+    'zones=0 的说明要写明「未执行查询」而不是「未发现」');
+assert_true($c['fix'] !== '', 'zones=0 时给出可操作的修复建议');
+
 /* ------------------------------------------------------------------ *
  * 9. 域名年龄
  * ------------------------------------------------------------------ */

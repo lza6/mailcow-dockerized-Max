@@ -62,7 +62,7 @@
 | R27 | 域名健康入口/弹窗**零硬编码中文** | `js/site/mailbox.js`、`templates/modals/mailbox.twig`、3 份语言包 | done | 中文字符扫描 0 处；**真实 Twig 渲染 × 3 语言 26 断言** | — |
 | R28 | 域名健康**判定逻辑可离线测试** | `inc/domain_health_lib.inc.php` + `.github/scripts/test-domain-health.php` | done | 60 断言；搬走的 3 个函数与 HEAD **逐字节相同** | — |
 | R29 | 出站 transport 的 TLS 判定跟随**实际选中的 nexthop** | `data/Dockerfiles/postfix/postfix.sh` | done | 真实容器 `postmap` 四场景 + 回归无变化 | **须重建镜像才生效**（见部署清单） |
-| R30 | 域名体检够快，不占死 php-fpm worker | `inc/dns_parallel.inc.php` + `dhc_collect` | **partial** | 冷 33.8s → **8.63s**；热 **0.68s** | 冷路径仍略超 8s 目标（RDAP 外部 HTTPS 占 ~5s） |
+| R30 | 域名体检够快，不占死 php-fpm worker | `inc/dns_parallel.inc.php` + `dhc_collect` | **partial** | 冷 33.8s → **8.6s**；**缓存命中 0.6–0.9s** | 缓存失效时退回 8s 量级；剩余是 RDAP 外部 HTTPS + RBL 批次尾部 |
 | R31 | redis 不可用时诊断页不崩 | `inc/ajax/domain_health.php:341` 附近 | done | 端点 E2E（redis=null）从 Fatal 变为正常渲染 | — |
 | R32 | 关键测试**真的进 CI** | `.github/workflows/ci.yml` | done | 新增 3 步；**cf-bridge 的 24 个测试此前从未进 CI，本次接入** | 按钮审计脚本仍缺 |
 | R33 | 每次变更给出可自测的报告 | `docs/04-运维与工程/变更报告-2026-10-12.html` | done | 12 题测验、答案键已校验 | — |
@@ -109,7 +109,7 @@
 | **域名健康弹窗渲染测试** | 2026-10-12 | 26/26（真实 Twig × en/zh-cn/zh-tw） | 改 `templates/modals/mailbox.twig` 或相关语言键后 |
 | **并发 DNS 报文解析测试** | 2026-10-12 | 32/32（合成报文，离线，进 CI） | 改 `data/web/inc/dns_parallel.inc.php` 后 |
 | **出站 transport 映射（A10）** | 2026-10-12 | 四场景对照 + 现有 `cf-bridge:2526` 无回归（**真实容器 `postmap`**） | 改 `data/Dockerfiles/postfix/postfix.sh` 后（**须先重建镜像**，见下） |
-| **域名体检耗时（A5）** | 2026-10-12 | 冷 **8.63s**（原 33.8s）/ 热 **0.68s** | 改 `dns_parallel.inc.php` / `dhc_collect` / RBL 名单后 |
+| **域名体检耗时（A5）** | 2026-10-12 | 冷 **8.6s**（原 33.8s）/ **缓存命中 0.6–0.9s**；无 redis 时≈冷路径 | 改 `dns_parallel.inc.php` / `dhc_collect` / RBL 名单后 |
 | **DB 版本门控守卫** | 2026-10-12 | 27/27；变异测试（赋值改注释）会失败 | 改 `inc/init_db.inc.php` 后 |
 | **号池 CSRF 网关** | 2026-10-12 | 四态通过（GET/无 token/被清空/正常） | 改 `inc/ajax/resend_pool.php` 后 |
 

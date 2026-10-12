@@ -203,11 +203,19 @@ function dhc_build_checks($D) {
   $rbl = isset($D['rbl']) ? $D['rbl'] : array();
   $listed  = isset($rbl['listed'])  ? $rbl['listed']  : array();
   $refused = isset($rbl['refused']) ? $rbl['refused'] : array();
+  $zones   = isset($rbl['zones'])   ? (int)$rbl['zones'] : 0;
   if (!empty($listed)) {
     $status = 'bad';
     $reason = '出口 IP 被发现于以下黑名单，会直接导致投递失败。';
     $fix = '按名单要求申请移除（delist），并排查是哪类邮件触发的投诉。';
     foreach ($listed as $l) { $ev[] = '已列入：' . $l; }
+  } elseif ($zones === 0) {
+    // 「一个名单都没查」必须与「查过且干净」区分开。
+    // 否则取不到出口 IP 时会给出一个绿色的「正常」徽章 —— 而真相是**根本没查**。
+    // 这一页的脚注恰好让用户「优先检查出口 IP 黑名单」，绿徽章会直接误导他跳过这里。
+    $status = 'unknown';
+    $reason = '未执行黑名单查询（通常因为取不到本机出口 IP）。';
+    $fix = '确认服务器能访问 ip4.mailcow.email（出站 80 端口），然后重新体检。';
   } else {
     $status = 'ok';
     $reason = '在已查询的黑名单中未发现该出口 IP。';
@@ -216,7 +224,7 @@ function dhc_build_checks($D) {
     $ev[] = '以下名单拒绝了本次查询（未生效，不代表被列入）：' . implode(', ', $refused);
     $ev[] = 'Spamhaus 对公共解析器返回 127.255.255.x 表示「查询被拒」。如需真实结果，请配置 Spamhaus DQS key。';
   }
-  if (isset($rbl['zones'])) { $ev[] = '共查询 ' . (int)$rbl['zones'] . ' 个名单'; }
+  $ev[] = '共查询 ' . $zones . ' 个名单';
   if (!empty($rbl['cached'])) { $ev[] = '（本结果来自缓存，最长 1 小时）'; }
   $C[] = array('id' => 'rbl', 'name' => '出口 IP 黑名单', 'status' => $status,
                'reason' => $reason, 'evidence' => $ev, 'fix' => $fix);

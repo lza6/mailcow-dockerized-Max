@@ -104,26 +104,109 @@ assert_true(is_all_empty(dhc_dns_parse(str_repeat("a", 12))), '恰好 12 字节�
 $r = dhc_dns_parse(pkt(1, 0x0100, [q_item('a.example', 1)], []));   // QR=0（是查询不是应答）
 assert_true(is_all_empty($r), 'QR=0（不是应答）应返回空');
 
-$r = dhc_dns_parse(pkt(1, 0x8183, [q_item('a.example', 1)], []));   // RCODE=3 NXDOMAIN
-assert_true(is_all_empty($r), 'NXDOMAIN（RCODE=3）应返回空，不能当"查到"');
+// ⚠️ RCODE 用例里必须放一条**本来会被解析出来**的记录（这里用 A），
+//    否则删掉 RCODE 检查结果一样是空 —— 测试就成了假阳性。
+//    （第一版放的是 SOA：type=6 不在解析分支里，无论有没有 RCODE 检查都返回空。）
+$nx = pkt(7, 0x8183, [q_item('a.example', 1)],
+    [rr($PTR_TO_QNAME, 1, inet_pton('6.6.6.6'))]);      // RCODE=3 + 一条 A
+assert_true(is_all_empty(dhc_dns_parse($nx)), 'NXDOMAIN（RCODE=3）应返回空，即使包里带 A 记录也不能当"查到"');
 
-$r = dhc_dns_parse(pkt(1, 0x8182, [q_item('a.example', 1)], []));   // SERVFAIL
-assert_true(is_all_empty($r), 'SERVFAIL 应返回空');
+$sf = pkt(8, 0x8182, [q_item('a.example', 1)],
+    [rr($PTR_TO_QNAME, 1, inet_pton('6.6.6.6'))]);      // RCODE=2
+assert_true(is_all_empty(dhc_dns_parse($sf)), 'SERVFAIL（RCODE=2）应返回空，即使包里带 A 记录');
 
 // 截断：声明有 1 条答案但字节不够
 $truncated = substr(pkt(1, 0x8180, [q_item('a.example', 1)], [rr($PTR_TO_QNAME, 1, "\x01\x02\x03\x04")]), 0, -2);
 $r = dhc_dns_parse($truncated);
 assert_true(is_array($r) && $r['A'] === [], '截断报文安全返回空');
 
-// 压缩指针自指（死循环陷阱）
-$selfLoop = pack('n6', 7, 0x8180, 1, 1, 0, 0) . "\xC0\x0C" . pack('nn', 1, 1)
-          . "\xC0\x0C" . pack('nnNn', 1, 1, 60, 4) . "\x01\x02\x03\x04";
-$r = dhc_dns_parse($selfLoop);
-assert_true(is_array($r), '自指压缩指针不死循环');
+// ⚠️ 自指压缩指针必须构造在**会被 dhc_dns_read_name 解析**的位置。
+//    owner 名走的是 dhc_dns_skip_name（它对压缩指针直接 +2 跳过，不跟随），
+//    所以把自指放在 owner 上测不到任何东西 —— 第一版就是这么写的，删掉自指保护仍全绿。
+//    rdata 里的 MX/PTR 目标才会走 dhc_dns_read_name，必须用那里的自指来测。
+$selfPtr = pkt(9, 0x8180, [q_item('a.example', 15)],
+    [rr("\xC0\x0C", 15, pack('n', 10) . "\xC0\x2C")]);   // MX 目标指向自己所在的偏移
+$r = dhc_dns_parse($selfPtr);
+assert_equals([], $r['MX'], 'MX 目标自指压缩指针应返回空（不死循环、不产出乱码）');
+
+// 越界指针：指向报文之外的偏移
+$oobPtr = pkt(10, 0x8180, [q_item('a.example', 15)],
+    [rr("\xC0\x0C", 15, pack('n', 10) . "\xFF\xFF")]);
+$r = dhc_dns_parse($oobPtr);
+assert_equals([], $r['MX'], 'MX 目标越界压缩指针应返回空');
+
+// 保留位（0x40 开头）不是合法的长度/指针
+$badLabel = pkt(11, 0x8180, [q_item('a.example', 15)],
+    [rr("\xC0\x0C", 15, pack('n', 10) . "\x40\x41\x00")]);
+$r = dhc_dns_parse($badLabel);
+assert_equals([], $r['MX'], 'MX 目标含保留位标签应返回空');
+
+// 指针成环：MX 目标的指针指向**它自己所在的偏移**。
+// 只挡「指向自己」的 `$ptr === $off` 能拦住这一例；但更一般的环
+// （A→B→A）要靠跳转次数上限。这里先测最直接的自指环。
+// rdata 布局： [2字节优先级][2字节指针]  →  指针值 = 指针自身所处的偏移
+$qLen   = strlen(q_item('a.example', 15));
+$rrBase = 12 + $qLen;                 // 答案段（owner 名）起点
+$rdOff  = $rrBase + 2 + 10;           // owner(2) + type/class/ttl/rdlen(10) = rdata 起点
+$ptrAt  = $rdOff + 2;                 // 优先级 2 字节之后就是指针
+$ring = pkt(12, 0x8180, [q_item('a.example', 15)],
+    [rr("\xC0\x0C", 15, pack('n', 10) . pack('n', 0xC000 | $ptrAt))]);
+$r = dhc_dns_parse($ring);
+assert_equals([], $r['MX'], 'MX 目标指针自指（环）应返回空，不得死循环');
 
 // ---------------------------------------------------------------- 2. A 记录
 
 section('A 记录');
+
+/* ------------------------------------------------------------------ *
+ * dhc_dns_read_name 直接测试（指针边界）
+ *
+ * 为什么单独测它：
+ *   前几版把「指针越界 / 成环」的用例塞进 `dhc_dns_parse()` 的整包里，
+ *   结果**把保护删掉测试仍然全绿** —— 因为构造的报文根本没走到那条分支
+ *   （owner 名走的是 dhc_dns_skip_name，它对指针只做 +2 跳过、不跟随）。
+ *   这种「以为守住了其实没测到」的假阳性比不写测试更危险，
+ *   所以这里改成直接喂 (报文, 偏移) 给纯函数，精确命中每个边界。
+ * ------------------------------------------------------------------ */
+section('dhc_dns_read_name 指针边界（直接测纯函数）');
+
+// 正常：未压缩名字
+assert_equals('a.example', dhc_dns_read_name("\x01a\x07example\x00", 0), '未压缩名字');
+
+// 正常：向前压缩指针
+//   offset 0: \x01a\x00       → "a"
+//   offset 3: \x01b\xC0\x00   → "b" + 跳回 offset 0 得 "a"  → "b.a"
+$bufOk = "\x01a\x00\x01b\xC0\x00";
+assert_equals('b.a', dhc_dns_read_name($bufOk, 3), '向前压缩指针正确拼接');
+
+// 自指：指针指向自身所在偏移 → 必须返回空
+$bufSelf = "\x01a\x00\xC0\x03";      // offset 3 处的指针值 = 3，指向自己
+assert_equals('', dhc_dns_read_name($bufSelf, 3), '自指指针返回空');
+
+// 向后跳（指针指向 >= 自身偏移）→ 畸形。这是防成环的第一道闸。
+$bufFwd = "\x01a\x00\xC0\x05\x01b\x00";   // offset 3 的指针指向 offset 5（后面）
+assert_equals('', dhc_dns_read_name($bufFwd, 3), '向后跳的指针返回空（只允许向前）');
+
+// 越界指针
+assert_equals('', dhc_dns_read_name("\x01a\x00\xFF\xFF", 3), '越界指针返回空');
+
+// 保留位标签：0x41 开头。**必须给足缓冲区**，否则会被「标签长度超出报文」
+// 那条兜住，测不到保留位检查本身（这就是第一版 D 变异能逃逸的原因）。
+// 这里缓冲区 = 1 + 65 + 1 = 67 字节，长度检查恰好放行，只有保留位检查能拦住。
+$bufReserved = "\x41" . str_repeat('x', 65) . "\x00";
+assert_equals('', dhc_dns_read_name($bufReserved, 0), '保留位标签返回空（缓冲区足够大时也拦得住）');
+
+// 标签长度超出报文
+assert_equals('', dhc_dns_read_name("\x09abc", 0), '标签长度超出报文返回空');
+
+// 连续向前跳应能收敛出名字（确认上面的规则没误伤正常情形）
+$bufChain = "\x01a\x00\x01b\xC0\x00";
+assert_equals('b.a', dhc_dns_read_name($bufChain, 3), '连续向前跳可正常解析');
+
+// 空/越界偏移
+assert_equals('', dhc_dns_read_name('', 0), '空报文返回空');
+assert_equals('', dhc_dns_read_name("\x00", 5), '起始偏移越界返回空');
+
 
 $p = pkt(1, 0x8180, [q_item('a.example', 1)], [rr($PTR_TO_QNAME, 1, inet_pton('93.184.216.34'))]);
 $r = dhc_dns_parse($p);

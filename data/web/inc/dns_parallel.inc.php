@@ -161,21 +161,26 @@ function dhc_dns_read_name($buf, $off) {
   $len = strlen($buf);
   $labels = array();
   $guard = 0;
-  $jumped = false;
-  $save = 0;
   while ($off < $len) {
     if (++$guard > 128) { return ''; }
     $l = ord($buf[$off]);
-    if ($l === 0) { $off++; break; }
+    if ($l === 0) { break; }
     if (($l & 0xC0) === 0xC0) {
       if ($off + 1 >= $len) { return ''; }
       $ptr = (($l & 0x3F) << 8) | ord($buf[$off + 1]);
-      if (!$jumped) { $save = $off + 2; $jumped = true; }
-      if ($ptr >= $len || $ptr === $off) { return ''; }   // 越界或自指
+      // **只允许向前跳**（DNS 压缩指针本就只能指向前面已出现的位置）。
+      // 这一条把「自指」「任意环」「越界」一次性都排除了：
+      //   越界 —— 若 $ptr < $off 而 $off < $len，则必然 $ptr < $len；
+      //   成环 —— 偏移严格递减必然收敛，所以不需要额外的跳转计数器。
+      // （这两句以前写成独立判断，实测是**不可达的冗余代码**，删掉。）
+      if ($ptr >= $off) { return ''; }
       $off = $ptr;
       continue;
     }
-    if (($l & 0xC0) !== 0) { return ''; }                 // 保留位，畸形
+    // 保留位（0x40/0x80 开头）不是合法的长度或指针。
+    // 注意这条**不能**靠「标签长度超出报文」兜底：只要缓冲区够大，
+    // 一个 0x41 开头的畸形标签就会被当成 65 字节的正常标签读出乱码。
+    if (($l & 0xC0) !== 0) { return ''; }
     if ($off + 1 + $l > $len) { return ''; }
     $labels[] = substr($buf, $off + 1, $l);
     $off += 1 + $l;

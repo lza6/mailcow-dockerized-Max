@@ -151,7 +151,7 @@
   <tr>
     <td><b>A5</b> 体检性能</td>
     <td>新增 <code>dns_parallel.inc.php</code>（原生 socket 并发 DNS，支持 A/MX/TXT/PTR）；<code>dhc_collect</code> 全部 DNS 合成一批；出口 IP 与 RDAP 用 <code>curl_multi</code> 并发；PTR 与 RBL 并发。</td>
-    <td>冷 <b>33.8 s → 8.6 s</b>（−74%）；热 <b>0.68 s</b>（达标）</td>
+    <td>冷 <b>33.8 s → 8.6 s</b>（−74%）；<b>缓存命中 0.6–0.9 s</b>（达标）。<br>⚠️ 缓存失效时退回 8 s 量级</td>
   </tr>
   <tr>
     <td>顺带修</td>
@@ -205,7 +205,7 @@
   <tr><td>既有回归</td><td><code>test-runner.php</code> / <code>test-lang-fallback.php</code></td><td>exit 0 / exit 0</td></tr>
   <tr><td>bridge</td><td><code>python3 helper-scripts/cf-email-bridge/test_bridge.py</code></td><td>24/24</td></tr>
   <tr><td>A10 真实容器</td><td><code>postmap -q &lt;sender&gt; mysql:…</code>（重建镜像后的真容器）</td><td>四场景全对 + 回归无变化</td></tr>
-  <tr><td>A5 性能</td><td>清 redis 缓存 + 重启 unbound 制造真冷，跑端点</td><td>冷 8.63 s / 热 0.68 s</td></tr>
+  <tr><td>A5 性能</td><td>清 redis 缓存 + 重启 unbound 制造真冷，跑端点（桩接真实 redis）</td><td>冷 8.6 s / 缓存命中 0.6–0.9 s</td></tr>
   <tr><td>端点 E2E</td><td>以 admin 会话真实执行端点（真实 DNS）</td><td>13/13 断言通过</td></tr>
 </table>
 
@@ -225,7 +225,7 @@
 
 <table>
   <tr><th>项</th><th>状态</th><th>原因 / 缺口</th></tr>
-  <tr><td>A5 冷路径 ≤ 8 s</td><td><span class="tag todo">部分达标</span></td><td>实测 8.63 s。剩余 ~5 s 是 RDAP 外部 HTTPS（第三方，无法压缩），~2.5 s 是 RBL 批次尾部</td></tr>
+  <tr><td>A5 冷路径 ≤ 8 s</td><td><span class="tag todo">部分达标</span></td><td><b>缓存命中时 0.6–0.9 s 达标</b>；缓存失效时退回 8.6 s 量级。剩余 ~5 s 是 RDAP 外部 HTTPS，~2.5 s 是 RBL 批次尾部。<br>独立审查在未接 redis 的桩下测得 1.1–7.2 s —— 说明真正决定体验的是「缓存是否命中」，不是这些数字本身</td></tr>
   <tr><td>生产部署</td><td><span class="tag blocked">阻塞</span></td><td>本机没有 <code>15.204.205.80</code> 的 SSH 凭据</td></tr>
   <tr><td>真实 465 中继端到端投递</td><td><span class="tag blocked">未做</span></td><td>需要一台真实的 <code>:465</code> 中继；本地只验证到「transport 选择正确 + 配置自检通过」</td></tr>
   <tr><td>按钮处理器审计脚本</td><td><span class="tag todo">仍缺</span></td><td>SOP 提到但仓库里没有脚本；「47 个控件全有处理器」是一次性人工核对，下次改模板无法自动复验</td></tr>
