@@ -96,6 +96,16 @@ function wwe_folder_leaf($full) {
   if ($i !== false) { $s = substr($s, $i + 1); }
   $j = strrpos($s, '/');
   if ($j !== false) { $s = substr($s, $j + 1); }
+  // ⚠️ IMAP 规定文件夹名用 **modified UTF-7** 传输。Gmail 实测返回的是：
+  //      &V4NXPpCuTvY-  = 垃圾邮件
+  //      &XfJT0ZCuTvY-  = 已发邮件
+  // 不解码的话，下面按 UTF-8 名字（'垃圾邮件' / 'sent'）做的匹配**永远命中不了**，
+  // 结果就是「垃圾箱判定」和「对方是否回信」两件核心功能**静默失效**
+  // （不是报错，而是永远返回"未找到文件夹"）。实测踩过。
+  if ($s !== '' && function_exists('mb_convert_encoding')) {
+    $dec = @mb_convert_encoding($s, 'UTF-8', 'UTF7-IMAP');
+    if (is_string($dec) && $dec !== '') { $s = $dec; }
+  }
   return $s;
 }
 
@@ -408,7 +418,10 @@ function wwe_sent_folder($conn, $ref) {
   static $exact = array(
     'sent', 'sent items', 'sent messages', 'sent mail', 'sent-mail', 'sentitems',
     'gesendet', 'éléments envoyés', 'enviados', 'inviati', 'verzonden',
-    '已发送', '已寄郵件', '寄件備份', '已發送', '送信済み', '보낸 편지함',
+    // 中文：Gmail 简中账号实测返回的是「已发邮件」，而**不是**「已发送」——
+    // 少了这一条，即使 MUTF-7 解码正确，Sent 文件夹依然找不到
+    // （子串兜底查的是「发送」「寄件」，也匹配不到「已发邮件」）。
+    '已发送', '已发邮件', '已寄郵件', '已寄件', '寄件備份', '已發送', '送信済み', '보낸 편지함',
   );
   $cands = array();
   foreach ($folders as $f) {
@@ -420,6 +433,7 @@ function wwe_sent_folder($conn, $ref) {
   }
   foreach ($cands as $full => $leaf) {
     if (strpos($leaf, 'sent') !== false || mb_strpos($leaf, '发送', 0, 'UTF-8') !== false
+        || mb_strpos($leaf, '已发', 0, 'UTF-8') !== false
         || mb_strpos($leaf, '寄件', 0, 'UTF-8') !== false) { return $full; }
   }
   return '';
