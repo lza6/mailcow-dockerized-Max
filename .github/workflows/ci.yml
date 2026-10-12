@@ -125,6 +125,9 @@ jobs:
       - name: 并发 DNS 报文解析测试（离线，合成报文）
         run: php .github/scripts/test-dns-parse.php
 
+      - name: 养号 IMAP 文件夹名解码测试（离线）
+        run: php .github/scripts/test-warmup-folder.php
+
       - name: 语言包回退逻辑测试
         run: php .github/scripts/test-lang-fallback.php
 
