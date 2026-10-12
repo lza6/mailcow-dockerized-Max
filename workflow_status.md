@@ -5,7 +5,8 @@
 
 - 生产环境：`15.204.205.80` / `mail.pony-it.com`
 - 目标仓库：`https://github.com/lza6/mailcow-dockerized-Max`（分支 `main`）
-- 本文件最后一次更新：2026-10-12（收尾轮：A6/A7/A10 完成 + A5 实测重估）
+- 本文件最后一次更新：2026-10-12（收尾轮 + 三个上线级缺陷修复）
+- **已推送**：远端 `main` = `d2902650f`，tag `v2026.07b-cn.13`（快进推送，非 force）
 - 本轮规格：`.specify/specs/001-final-closure/spec.md`　变更报告：`docs/04-运维与工程/变更报告-2026-10-12.html`
 
 ---
@@ -49,6 +50,10 @@
 | R31 | redis 不可用时诊断页不崩 | `inc/ajax/domain_health.php:341` 附近 | done | 端点 E2E（redis=null）从 Fatal 变为正常渲染 | — |
 | R32 | 关键测试**真的进 CI** | `.github/workflows/ci.yml` | done | 新增 3 步；**cf-bridge 的 24 个测试此前从未进 CI，本次接入** | 按钮审计脚本仍缺 |
 | R33 | 每次变更给出可自测的报告 | `docs/04-运维与工程/变更报告-2026-10-12.html` | done | 12 题测验、答案键已校验 | — |
+| R34 | **`$db_version` 必须是真的赋值**（门控与 sogo 都依赖它） | `inc/init_db.inc.php:27` | **done** | 变异测试：改回注释后 CI 守卫失败；实测触发一次 schema 同步后 `versions.db_schema` 更新为 `12102026_0100`、`warmup_messages` 建出 | — |
+| R35 | 号池绑定域名不再 500 | `functions.resend_pool.inc.php:387`（补 `global $pdo`） | **done** | 探针证实 `null->prepare()` 抛 `Error`、`catch (Exception)` 接不住 | **待真实点一次「绑定」复验**（会调 Resend/CF 计费接口） |
+| R36 | 号池写动作必须 POST + CSRF | `inc/ajax/resend_pool.php:40-73` | **done** | 四态实测：GET→405 / 无 token→403 / `$_POST` 被清空→403 / 正常→放行 | — |
+| R37 | `check_all` 的 redis 锁原子化 | `inc/ajax/overview.php:346` | done | 真实 redis 实测 SET NX EX：首次 true(ttl=20)、再次 false | — |
 
 ---
 
@@ -86,6 +91,8 @@
 | **并发 DNS 报文解析测试** | 2026-10-12 | 32/32（合成报文，离线，进 CI） | 改 `data/web/inc/dns_parallel.inc.php` 后 |
 | **出站 transport 映射（A10）** | 2026-10-12 | 四场景对照 + 现有 `cf-bridge:2526` 无回归（**真实容器 `postmap`**） | 改 `data/Dockerfiles/postfix/postfix.sh` 后（**须先重建镜像**，见下） |
 | **域名体检耗时（A5）** | 2026-10-12 | 冷 **8.63s**（原 33.8s）/ 热 **0.68s** | 改 `dns_parallel.inc.php` / `dhc_collect` / RBL 名单后 |
+| **DB 版本门控守卫** | 2026-10-12 | 27/27；变异测试（赋值改注释）会失败 | 改 `inc/init_db.inc.php` 后 |
+| **号池 CSRF 网关** | 2026-10-12 | 四态通过（GET/无 token/被清空/正常） | 改 `inc/ajax/resend_pool.php` 后 |
 
 > **下次改到某块代码时，先看本表：如果对应验证项没变，就不用重跑。**
 
