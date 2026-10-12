@@ -1,6 +1,6 @@
 ---
 name: mailcow-max-feature
-description: Use when adding or changing anything in the mailcow-dockerized-Max repo — new admin page, AJAX endpoint, database table, ofelia cron job, warmup/relay feature, or any change to data/web/**, data/conf/**, or docker-compose.yml. Enforces the "read docs + memory first, judge staleness, then read real code, then code" order, applies the project's known traps (empty tbody removal, CSRF semantics, init_db version gate, mail-store isolation), and requires evidence-based acceptance before claiming done.
+description: Use when adding or changing anything in the mailcow-dockerized-Max repo — new admin page, AJAX endpoint, database table, ofelia cron job, warmup/relay feature, or any change to data/web/**, data/conf/**, data/Dockerfiles/** or docker-compose.yml. Enforces the "read docs + memory first, judge staleness, then read real code, then code" order, applies the project's known traps (empty tbody removal, CSRF semantics, init_db version gate, mail-store isolation, **Dockerfiles changes not being applied without build:**, JS-vs-Twig lang key levels), and requires evidence-based acceptance before claiming done.
 ---
 
 # mailcow-dockerized-Max · 功能开发工作流
@@ -36,6 +36,8 @@ description: Use when adding or changing anything in the mailcow-dockerized-Max 
 | 新增表 | 改 `$tables` **并且提升 `$db_version`**，部署后 `SHOW TABLES` 复核 |
 | 改已有表的列/索引 | `init_db` 不会 ALTER，自己写迁移 SQL 并在部署脚本里跑 |
 | `docker-compose.yml` | `up -d --force-recreate --no-deps <容器>`，**随后重启 nginx**（缓存上游 IP） |
+| `data/Dockerfiles/**` | ⚠️ **默认根本不生效** —— compose 全是 `image: ghcr.io/...`、无 `build:` 段。要给该服务加 `build:` 再 `docker compose build <svc>` + 重建容器；`restart`/挂载都没用。Windows 检出上构建前先把行尾归一到 LF（否则 `#!/bin/bash\r` → exit 127） |
+| `data/web/inc/dns_parallel.inc.php` | 无外部依赖，但改了解析逻辑要跑 `.github/scripts/test-dns-parse.php` |
 | 新定时任务 | 标签挂在**承载它的容器**上（php-fpm 或 dovecot），不是 ofelia |
 | 新写端点 | 显式 CSRF 判定（见下）；无参动作尤其危险 |
 
@@ -48,17 +50,36 @@ description: Use when adding or changing anything in the mailcow-dockerized-Max 
 
 ## 第 4 步：验证（要证据，不要"应该可以"）
 
+**先跑测试套件**（都可从仓库根直接调用、零第三方依赖）：
+
+```bash
+php .github/scripts/test-runner.php              # 语言包结构 / 回退 / 安全
+php .github/scripts/test-domain-health.php       # 域名健康纯函数（60 断言）
+php .github/scripts/test-render-domain-health.php# 真实 Twig 渲染 × 3 语言（26 断言）
+php .github/scripts/test-dns-parse.php           # 并发 DNS 报文解析，离线（32 断言）
+php .github/scripts/test-lang-fallback.php       # 语言包运行期回退
+python3 helper-scripts/cf-email-bridge/test_bridge.py   # 桥接（24 项）
+node .github/scripts/check-lang.cjs              # 语言包缺键
+node .github/scripts/check-placeholders.cjs      # 占位符/标签一致性
+```
+
+这些**已经进 CI**，所以本地跑通 ≈ CI 会绿。除此之外按改动类型补：
+
 | 验收 | 工具 | 何时必跑 |
 |---|---|---|
-| 渲染正确 | jsdom 加载**真实页面 + 真实 bundle**，数 `querySelectorAll('tr').length` | 改模板/JS |
-| 无假按钮 | 扫模板控件 id/class，逐个核对 JS 有无绑定 | 改模板/JS |
+| 渲染正确 | jsdom 加载**真实页面 + 真实 bundle**，数 `querySelectorAll('tr').length`；模板类改动至少跑上面的 Twig 渲染测试 | 改模板/JS |
+| 无假按钮 | 扫模板控件 id/class，逐个核对 JS 有无绑定（**脚本尚未沉淀，目前需人工**） | 改模板/JS |
 | 无空 tbody | `helper-scripts/check_empty_tbody.cjs` | 改任何 `.twig` |
-| 端点三态 | 伪造 token→**403** / GET→**405** / 合法→**成功** | 改端点 |
+| 端点三态 | 伪造 token→**403** / GET→**405** / 合法→**成功**；外加「依赖不可用时降级」——用桩把 `$redis` 置 null 跑一遍端点 | 改端点 |
 | 数据库 | `SHOW TABLES` / `DESCRIBE` / `SHOW INDEX` | 改 `init_db` |
 | 并发 | 压测脚本 | 改写路径或首屏构建 |
+| 改了 `data/Dockerfiles/**` | 比对**运行时产物**（`docker exec <c> md5sum /opt/xxx.sh`），不是比对源码 | 任何 Dockerfiles 改动 |
 
 > **只看响应体不算验证。** 前端功能必须验证**渲染后的结果** ——
 > 两者之间隔着一整个 JS 运行时（本项目为此空白过两次）。
+>
+> **只看源码不算验证。** 改 `data/Dockerfiles/**` 时必须确认它到底有没有进容器
+> （默认没有，见第 2 步）。
 
 ## 第 5 步：收尾（缺一不可）
 
@@ -69,12 +90,15 @@ description: Use when adding or changing anything in the mailcow-dockerized-Max 
 
 ---
 
-## 三个最高频的坑（先看这三条）
+## 四个最高频的坑（先看这四条）
 
 1. **空 `<tbody>` 会被 mailcow 的 `footer.js` 删掉** → 表格永久空白、**无报错**、响应体正常
 2. **CSRF**：框架校验通过后会 `unset` 字段并轮换 token；比对 token 值会让**所有合法写请求 403**。
    正确判据是「`$_POST` 是否被清空」
 3. **`init_db_schema()` 版本门控**：改表结构不提升 `$db_version` → 表永远建不出来**且不报错**
+4. **`data/Dockerfiles/**` 的改动默认不进容器**：compose 全是预构建镜像、无 `build:` 段
+   → 改了 `postfix.sh` 之类，重启、挂载都没用。要生效得给该服务加 `build:` 并重建镜像。
+   **判定"到底生效没有"要比对运行时产物**（`docker exec <c> md5sum /opt/xxx`），不是比对源码
 
 ---
 

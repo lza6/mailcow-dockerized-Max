@@ -26,6 +26,8 @@ env:
   PHP_VERSION: "8.2"
   # Node 仅用于语言包校验脚本（仓库自带 node 校验逻辑）
   NODE_VERSION: "20"
+  # Python 仅用于 cf-bridge 单元测试（纯标准库，无第三方依赖）
+  PYTHON_VERSION: "3.12"
 
 jobs:
   # ============================================================
@@ -92,7 +94,9 @@ jobs:
   # Stage 2: 单元/集成测试
   # 本项目无既有测试框架，此 job 运行「可验证真实行为」的检查：
   #   - PHP 关键函数的行为测试（自建轻量断言，不引入新依赖）
+  #   - 域名健康纯函数的判定测试（RBL 分类 / SPF 语义 / 分档，见 inc/domain_health_lib.inc.php）
   #   - 语言包结构与回退逻辑验证
+  #   - cf-bridge 单元测试（标准库 unittest，无第三方依赖）
   # ============================================================
   test:
     name: 测试
@@ -112,5 +116,22 @@ jobs:
       - name: 运行 PHP 断言测试
         run: php .github/scripts/test-runner.php
 
+      - name: 域名健康纯函数测试
+        run: php .github/scripts/test-domain-health.php
+
+      - name: 域名健康弹窗渲染测试（真实 Twig × 3 语言）
+        run: php .github/scripts/test-render-domain-health.php
+
+      - name: 并发 DNS 报文解析测试（离线，合成报文）
+        run: php .github/scripts/test-dns-parse.php
+
       - name: 语言包回退逻辑测试
         run: php .github/scripts/test-lang-fallback.php
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: cf-bridge 单元测试
+        run: python3 helper-scripts/cf-email-bridge/test_bridge.py

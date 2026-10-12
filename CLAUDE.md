@@ -250,10 +250,14 @@ docker compose logs --since 24h postfix-mailcow
 | 语言加载与回退 | `data/web/inc/prerequisites.inc.php:190-274` |
 | 递归合并实现 | `data/web/inc/lib/array_merge_real.php` |
 | 上游补 key 脚本 | `helper-scripts/add-new-lang-keys.php` |
-| 中继映射 SQL | `data/conf/postfix/sql/mysql_sender_dependent_default_transport_maps.cf` |
+| 中继映射 SQL（**生成器**） | `data/Dockerfiles/postfix/postfix.sh` → 生成 `/opt/postfix/conf/sql/mysql_sender_dependent_default_transport_maps.cf` |
 | 出站过滤/黑名单配置 | `data/conf/postfix/main.cf`、`data/conf/rspamd/` |
 | 反垃圾出站/入站策略 | `data/conf/rspamd/local.d/`、`data/conf/rspamd/override.d/` |
 | 备份/恢复 | `helper-scripts/backup_and_restore.sh` |
+| 域名健康检查（端点） | `data/web/inc/ajax/domain_health.php` |
+| 域名健康判定逻辑（**纯函数，可离线测试**） | `data/web/inc/domain_health_lib.inc.php` |
+| 并发 DNS 原语（A/MX/TXT/PTR，**只做 I/O**） | `data/web/inc/dns_parallel.inc.php` |
+| **测试入口** | `.github/scripts/test-runner.php`、`test-domain-health.php`、`test-render-domain-health.php`、`test-dns-parse.php`、`test-lang-fallback.php`、`helper-scripts/cf-email-bridge/test_bridge.py`（均可从仓库根直接调用，无第三方依赖） |
 | **项目文档总目录** | `docs/README.md`（投递与信誉 / 接入指南 / 功能设计 / 运维与工程） |
 | 养号（Warmup）功能 | `data/web/inc/functions.warmup.inc.php`、`docs/03-功能设计/养号功能-任务台账.md` |
 | Resend 号池功能 | `data/web/inc/functions.resend_pool.inc.php`、`docs/03-功能设计/Resend号池-*.md` |

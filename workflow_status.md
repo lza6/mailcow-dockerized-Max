@@ -5,7 +5,8 @@
 
 - 生产环境：`15.204.205.80` / `mail.pony-it.com`
 - 目标仓库：`https://github.com/lza6/mailcow-dockerized-Max`（分支 `main`）
-- 本文件最后一次更新：2026-10-11，对应 Release `v2026.07b-cn.7`
+- 本文件最后一次更新：2026-10-12（收尾轮：A6/A7/A10 完成 + A5 实测重估）
+- 本轮规格：`.specify/specs/001-final-closure/spec.md`　变更报告：`docs/04-运维与工程/变更报告-2026-10-12.html`
 
 ---
 
@@ -41,6 +42,13 @@
 | R24 | 域名信誉显示 + 数据来源标注 | 部分：SPF/DKIM/DMARC/MX + RDAP 域龄 | partial | 体检已有；来源是 `dns_get_record` + RDAP | **Google Postmaster 信誉分未接入**（需用户 OAuth 授权） |
 | R25 | 高并发/压测 | — | partial | 只读 1950 请求 0 失败；并发写 600 次 0 死锁 | 发现 `pm.max_children=50` 打满；更高并发需调大 |
 | R26 | 用户提出的「密码可复制」 | — | blocked | 同 R11 | 只能：重置后显示一次 / 为养号收件人凭据保存（R12） |
+| R27 | 域名健康入口/弹窗**零硬编码中文** | `js/site/mailbox.js`、`templates/modals/mailbox.twig`、3 份语言包 | done | 中文字符扫描 0 处；**真实 Twig 渲染 × 3 语言 26 断言** | — |
+| R28 | 域名健康**判定逻辑可离线测试** | `inc/domain_health_lib.inc.php` + `.github/scripts/test-domain-health.php` | done | 60 断言；搬走的 3 个函数与 HEAD **逐字节相同** | — |
+| R29 | 出站 transport 的 TLS 判定跟随**实际选中的 nexthop** | `data/Dockerfiles/postfix/postfix.sh` | done | 真实容器 `postmap` 四场景 + 回归无变化 | **须重建镜像才生效**（见部署清单） |
+| R30 | 域名体检够快，不占死 php-fpm worker | `inc/dns_parallel.inc.php` + `dhc_collect` | **partial** | 冷 33.8s → **8.63s**；热 **0.68s** | 冷路径仍略超 8s 目标（RDAP 外部 HTTPS 占 ~5s） |
+| R31 | redis 不可用时诊断页不崩 | `inc/ajax/domain_health.php:341` 附近 | done | 端点 E2E（redis=null）从 Fatal 变为正常渲染 | — |
+| R32 | 关键测试**真的进 CI** | `.github/workflows/ci.yml` | done | 新增 3 步；**cf-bridge 的 24 个测试此前从未进 CI，本次接入** | 按钮审计脚本仍缺 |
+| R33 | 每次变更给出可自测的报告 | `docs/04-运维与工程/变更报告-2026-10-12.html` | done | 12 题测验、答案键已校验 | — |
 
 ---
 
@@ -73,6 +81,11 @@
 | 邮箱级中继切换 | 2026-07b-cn.10 | 改→生效→改回→非法值被拒，审计 4 条 | 改 `set_mailbox_relay` 后 |
 | 只读压测 | 2026-07b-cn.4 | 1950 请求 0 失败，峰值 ~123 RPS | 改 `overview_build()` 或加首屏网络 I/O 后 |
 | 数据库索引 | 2026-07b-cn.5 | `overview_mbox_daily.day`、`warmup_log.plan_run` 已建 | 改 `init_db.inc.php` 后 |
+| **域名健康纯函数测试** | 2026-10-12 | 60/60（`php .github/scripts/test-domain-health.php`） | 改 `data/web/inc/domain_health_lib.inc.php` 或 `inc/ajax/domain_health.php` 后 |
+| **域名健康弹窗渲染测试** | 2026-10-12 | 26/26（真实 Twig × en/zh-cn/zh-tw） | 改 `templates/modals/mailbox.twig` 或相关语言键后 |
+| **并发 DNS 报文解析测试** | 2026-10-12 | 32/32（合成报文，离线，进 CI） | 改 `data/web/inc/dns_parallel.inc.php` 后 |
+| **出站 transport 映射（A10）** | 2026-10-12 | 四场景对照 + 现有 `cf-bridge:2526` 无回归（**真实容器 `postmap`**） | 改 `data/Dockerfiles/postfix/postfix.sh` 后（**须先重建镜像**，见下） |
+| **域名体检耗时（A5）** | 2026-10-12 | 冷 **8.63s**（原 33.8s）/ 热 **0.68s** | 改 `dns_parallel.inc.php` / `dhc_collect` / RBL 名单后 |
 
 > **下次改到某块代码时，先看本表：如果对应验证项没变，就不用重跑。**
 
@@ -120,3 +133,33 @@
 | `docker-compose.yml`（ofelia 标签 / 新挂载） | `docker compose up -d --force-recreate --no-deps php-fpm-mailcow`，**随后必须重启 nginx**（它缓存上游 IP） |
 | `data/conf/phpfpm/crons/*.php` | 只重启 php-fpm（目录已挂载） |
 | `init_db.inc.php` 新增表 | 无需操作（下次请求自动建）；**改已有表的列必须手工 ALTER** |
+| `data/Dockerfiles/**`（如 `postfix/postfix.sh`） | **必须重建镜像**：先给该服务加 `build:`（见下），再 `docker compose build <svc> && docker compose up -d --force-recreate --no-deps <svc>`。**`restart` 和挂载都不会生效** |
+
+### ⚠️ `data/Dockerfiles/**` 的改动默认**根本不生效**
+
+`docker-compose.yml` 里所有服务都是 `image: ghcr.io/mailcow/...`，**没有 `build:` 段** ——
+也就是说仓库里的 `data/Dockerfiles/**` 是给"自建镜像"用的，默认部署全部走 registry 的预构建镜像。
+
+实测证据（2026-10-12）：容器内 `/opt/postfix.sh` 的 md5 与仓库版本不同、且**不含 `cf465`**；
+由此生成的 `mysql_sender_dependent_default_transport_maps.cf` 也就没有该分支。
+所以 `smtp_cf465` 这个功能在原部署里**只存在于 bind mount 的 `master.cf`，选择它的逻辑从没进来**。
+
+要让它生效（已在本地栈验证）：
+
+```bash
+# 只给 postfix 启用本地构建（不要整体启用 BUILD_FLAGS —— 那会重建 12 个镜像）
+cat > docker-compose.override.yml <<'YML'
+services:
+  postfix-mailcow:
+    build: ./data/Dockerfiles/postfix
+YML
+docker compose build postfix-mailcow
+docker compose up -d --force-recreate --no-deps postfix-mailcow
+# 验证：两处都应输出非 0
+docker exec postfix-mailcow grep -c cf465 /opt/postfix.sh
+docker exec postfix-mailcow grep -c 'IF((SELECT COALESCE(' /opt/postfix/conf/sql/mysql_sender_dependent_default_transport_maps.cf
+```
+
+> **Windows 检出上构建会崩**：`core.autocrlf=true` 且无 `.gitattributes`，工作区 `data/Dockerfiles/**`
+> 全是 CRLF，`#!/bin/bash\r` 会让容器 `exec` 失败（exit 127）。git 索引里存的是 LF，
+> **Linux/生产不受影响**；Windows 上构建前先 `tr -d '\r'` 归一化。

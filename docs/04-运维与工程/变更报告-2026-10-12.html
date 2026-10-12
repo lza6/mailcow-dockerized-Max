@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>变更报告 · mailcow-dockerized-Max · 2026-10-12</title>
+<style>
+  :root{
+    --paper:#fbf9f5; --ink:#1c1b19; --muted:#6b675f; --line:#e2ddd2;
+    --accent:#9a3412; --accent-soft:#fdeee6;
+    --ok:#15803d; --ok-bg:#eefbf2; --bad:#b91c1c; --bad-bg:#fdecec;
+    --code-bg:#f4f1ea;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font:16px/1.75 ui-serif,Georgia,"Songti SC","Noto Serif CJK SC",serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:860px;margin:0 auto;padding:56px 24px 120px}
+  header{border-bottom:3px double var(--line);padding-bottom:28px;margin-bottom:40px}
+  .kicker{
+    font:600 12px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--accent);margin-bottom:14px
+  }
+  h1{font-size:clamp(28px,4.5vw,42px);line-height:1.15;margin:0 0 14px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:15px}
+  h2{
+    font-size:23px;margin:56px 0 6px;letter-spacing:-.01em;
+    padding-left:14px;border-left:4px solid var(--accent);
+  }
+  h3{font-size:17px;margin:30px 0 8px;font-family:ui-sans-serif,system-ui,sans-serif}
+  p{margin:12px 0}
+  .lede{font-size:18px;color:#38352f}
+  code,pre{font-family:ui-monospace,SFMono-Regular,"Cascadia Mono",Menlo,monospace;font-size:13px}
+  code{background:var(--code-bg);padding:1.5px 5px;border-radius:3px}
+  pre{
+    background:var(--code-bg);border:1px solid var(--line);border-radius:6px;
+    padding:14px 16px;overflow:auto;line-height:1.6
+  }
+  .card{
+    border:1px solid var(--line);border-radius:8px;padding:18px 20px;margin:18px 0;background:#fff
+  }
+  .card.warn{background:var(--accent-soft);border-color:#f2cdbb}
+  .card.good{background:var(--ok-bg);border-color:#c7ebd5}
+  .card h3{margin-top:0}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;
+        font-family:ui-sans-serif,system-ui,sans-serif}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-weight:600;color:var(--muted);font-size:12px;letter-spacing:.04em;text-transform:uppercase}
+  .tag{
+    display:inline-block;font:600 11px/1 ui-sans-serif,system-ui,sans-serif;
+    padding:3px 7px;border-radius:99px;letter-spacing:.03em
+  }
+  .tag.done{background:var(--ok-bg);color:var(--ok)}
+  .tag.todo{background:#fff5e6;color:#92400e}
+  .tag.blocked{background:var(--bad-bg);color:var(--bad)}
+  ul{padding-left:22px}
+  li{margin:6px 0}
+  .quiz{margin-top:64px;border-top:3px double var(--line);padding-top:32px}
+  .q{border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin:14px 0;background:#fff}
+  .q .stem{font-weight:600;margin-bottom:10px}
+  .q label{display:block;padding:8px 10px;border-radius:6px;cursor:pointer;margin:4px 0;
+           font-family:ui-sans-serif,system-ui,sans-serif;font-size:14px}
+  .q label:hover{background:#f7f4ee}
+  .q label.right{background:var(--ok-bg);color:var(--ok);font-weight:600}
+  .q label.wrong{background:var(--bad-bg);color:var(--bad)}
+  .q .why{display:none;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);
+          font-size:13.5px;color:var(--muted)}
+  .q .why.show{display:block}
+  button{
+    font:600 14px/1 ui-sans-serif,system-ui,sans-serif;padding:11px 20px;border-radius:6px;
+    border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer
+  }
+  button.ghost{background:transparent;color:var(--accent)}
+  #verdict{margin-top:18px;font-weight:700;font-size:17px;display:none;padding:14px 18px;border-radius:8px}
+  #verdict.pass{display:block;background:var(--ok-bg);color:var(--ok)}
+  #verdict.fail{display:block;background:var(--bad-bg);color:var(--bad)}
+  .foot{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);
+        color:var(--muted);font-size:13px}
+  hr{border:0;border-top:1px solid var(--line);margin:36px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">变更报告 · mailcow-dockerized-Max</div>
+  <h1>把「纸面闭环」变成「真的闭环」</h1>
+  <p class="sub">2026-10-12 · 收尾 A6 / A7 / A10，并推翻 A5 的「已完成」结论 · 全部结论附实测命令</p>
+</header>
+
+<p class="lede">
+这一轮的起点不是「还剩什么没做」，而是一个更让人不安的问题：
+<strong>上一轮文档里写着「已修复」的那些项，代码里到底修没修？</strong>
+因为本项目历史上已经出现过两次「文档结论被后续实测推翻」。
+</p>
+
+<h2>一、上下文：这轮在质疑什么</h2>
+
+<p>上一轮把问题登记成 A1–A10。会话前半段完成了 A6（零硬编码中文）、A7（纯函数测试）、A10（transport 判定）。但执行过程中接连发现：<b>我自己的直觉判断，被实测推翻了三次</b>。这三次推翻，比那三项修复本身更值钱。</p>
+
+<h2>二、三个被实测推翻的直觉</h2>
+
+<div class="card warn">
+<h3>直觉 1：「<code>smtp_cf465</code> 永不触发，是因为当前 relayhost 不是 <code>:465</code>」</h3>
+<p><b>实测推翻。</b> 容器里 <code>/opt/postfix.sh</code> 的 md5 和仓库版本不同，且 <b>一处 <code>cf465</code> 都没有</b>。原因是 <code>docker-compose.yml</code> 里 postfix 用的是 <code>ghcr.io/mailcow/postfix:3.10.12-1</code> 预构建镜像、<b>没有 <code>build:</code> 段</b> —— 仓库里的 <code>postfix.sh</code> 是打进镜像的，从未被使用。</p>
+<p>所以 <code>master.cf</code> 里的连接器能加载（它是 bind mount），但<b>选择它的逻辑根本没进来</b>。这个「功能」在原部署里不存在。</p>
+</div>
+
+<div class="card warn">
+<h3>直觉 2：「域名体检慢，是因为要查 13 个 RBL 名单」</h3>
+<p><b>部分推翻。</b> 名单多只是表象。逐层测下来，真正的瓶颈是<b>解析器链路</b>：</p>
+<table>
+  <tr><th>测量</th><th>结果</th></tr>
+  <tr><td>并发 5 个查询 → unbound <code>172.22.1.254</code></td><td><b>1/5 应答，6.1 s</b></td></tr>
+  <tr><td>并发 5 个 → Docker 内嵌 <code>127.0.0.11</code>（冷）</td><td>1–4/5，4.0 s</td></tr>
+  <tr><td>并发 5 个 → 内嵌（热）</td><td>5/5，0.2 s</td></tr>
+  <tr><td>直连公共解析器的原始 RTT</td><td><b>50–160 ms</b>（稳定）</td></tr>
+</table>
+<p>即：unbound 能串行服务、但<b>不并发应答同一来源的多个在途 UDP 查询</b>；而「网络慢」这个假设被彻底证伪。</p>
+</div>
+
+<div class="card warn">
+<h3>直觉 3：「纯函数抽出来就能测了」</h3>
+<p><b>只对了一半。</b> 抽出纯函数确实让判定逻辑可测了（60 条断言），但<b>端点本身仍然测不到</b> —— 它 require 即执行。直到我真写了一层 <code>prerequisites</code> 桩去<b>真跑端点</b>，才暴露第二处缺陷：</p>
+<pre>Fatal error: Call to a member function hGet() on null
+  in /tmp/e3/inc/ajax/domain_health.php:343</pre>
+<p><code>$redis-&gt;hGet('DKIM_SELECTORS', ...)</code> 是该文件里<b>唯一</b>没有 <code>if ($redis)</code> 保护的调用（其余 6 处都有）。更隐蔽的是：<code>$redis</code> 为 <code>null</code> 时抛的是 <code>Error</code>（PHP 8 里不继承 <code>Exception</code>），而原代码只 <code>catch (Exception)</code> —— 拦不住。<b>redis 一抖动，这个诊断页直接 500。而它恰恰是出问题时最该能打开的页。</b></p>
+</div>
+
+<h2>三、做了什么</h2>
+
+<table>
+  <tr><th>项</th><th>改动</th><th>验证</th></tr>
+  <tr>
+    <td><b>A6</b> 零硬编码中文</td>
+    <td><code>mailbox.js:530,535</code>、<code>modals/mailbox.twig:1355</code> 改用语言键；语言包补 3 个键 × 3 语言。<br>顺带删掉我上轮加的<b>死键</b> <code>admin.domain_health</code>（无引用），并把混进去的裸 LF 归一。</td>
+    <td>验收 grep 0 输出；<b>真实 Twig 渲染 × 3 语言</b> 26 断言通过；英文界面无中文残留</td>
+  </tr>
+  <tr>
+    <td><b>A7</b> 纯函数测试</td>
+    <td>新增 <code>data/web/inc/domain_health_lib.inc.php</code>（常量 + build_checks + status_badge + summarize + 新谓词 <code>dhc_rbl_classify</code>）；端点 require 它。</td>
+    <td>60 断言；迁移的 3 个函数与 HEAD <b>逐字节相同</b>（零语义变化）</td>
+  </tr>
+  <tr>
+    <td><b>A10</b> transport 判定</td>
+    <td>判定改为<b>与 nexthop 同一个 COALESCE</b>（原实现只查 <code>domain.relayhost</code>，漏了邮箱级中继）；<code>master.cf</code> 注释去掉「Cloudflare 专用」的误导。</td>
+    <td>真实容器 <code>postmap</code> 四场景对照 + 回归对照（见下）</td>
+  </tr>
+  <tr>
+    <td><b>A5</b> 体检性能</td>
+    <td>新增 <code>dns_parallel.inc.php</code>（原生 socket 并发 DNS，支持 A/MX/TXT/PTR）；<code>dhc_collect</code> 全部 DNS 合成一批；出口 IP 与 RDAP 用 <code>curl_multi</code> 并发；PTR 与 RBL 并发。</td>
+    <td>冷 <b>33.8 s → 8.6 s</b>（−74%）；热 <b>0.68 s</b>（达标）</td>
+  </tr>
+  <tr>
+    <td>顺带修</td>
+    <td><code>domain_health.php:343</code> redis 未判空 → 已加守卫 + <code>catch (Throwable)</code> + <code>error_log</code></td>
+    <td>端点 E2E（redis 不可用场景）从 Fatal 变为正常渲染</td>
+  </tr>
+  <tr>
+    <td>CI</td>
+    <td>新增 3 个测试步骤；<b>把 cf-bridge 的 24 个测试接进 CI</b>（此前从未进过 CI）</td>
+    <td>ci.yml YAML 解析通过；4 套测试本地全绿</td>
+  </tr>
+</table>
+
+<h2>四、踩过的坑（这部分最值钱）</h2>
+
+<div class="card">
+<h3>1. Windows 检出直接构建镜像 → 容器 exit 127</h3>
+<p><code>core.autocrlf=true</code> 且仓库没有 <code>.gitattributes</code>，工作区里 <code>data/Dockerfiles/**</code> 全是 CRLF。<code>#!/bin/bash\r</code> 让 <code>exec</code> 返回 ENOENT，supervisor 反复重启后 FATAL。</p>
+<p><b>关键区分</b>：git 索引里存的是 <b>LF</b>（实测 <code>git show HEAD:...postfix.sh</code> 的 CRLF 计数为 0），所以 <b>Linux / 生产构建不受影响</b>；只有在 Windows 上构建才会踩。</p>
+</div>
+
+<div class="card">
+<h3>2. <code>socket_select</code> 返回后只 <code>recvfrom</code> 一次，会间歇性丢结果</h3>
+<p>select 只说「这个 fd 可读」，它的接收缓冲里可能排着<b>多个</b>应答。只读一次的话，剩下的包会一直躺着，而下一轮 select 未必再报这个 fd —— 表现是同一批查询「一次全中、一次全空」。</p>
+<p>必须<b>排空</b>每个就绪 fd 的接收缓冲。</p>
+</div>
+
+<div class="card">
+<h3>3. 拿「剩余总时长」当 select 的超时，会让排队的查询永远发不出去</h3>
+<p>一旦某轮 select 阻塞很久，后续查询就卡在 pending 里，最后整批一起超时。<b>等待窗口要封顶（200 ms）</b>，让发送节奏不受阻塞时长影响。</p>
+</div>
+
+<div class="card">
+<h3>4. 我一开始把「慢」归因给了错误的解析器</h3>
+<p>先改直连 unbound → 更糟（unbound 不并发应答）；再改回内嵌 → 仍不理想。最后用<b>对照实验</b>（同一批查询分别发到 unbound / 内嵌 / 公共解析器）才定位到真正可用的路径。<b>不靠对照实验、只靠推理，会在这里反复来回。</b></p>
+</div>
+
+<div class="card warn">
+<h3>5. 我的<b>测试脚本自己写错了 3 处</b>，一度被当成产品缺陷</h3>
+<p>TXT 的长度前缀我写错（<code>chr(9)</code> 应为 <code>chr(2)</code>）、MX 压缩指针指向的名字算错、把 <code>dhc_dns_parse</code> 的返回值当成 <code>[]</code> 而不是四键结构。<b>测试写错会造成和代码错一模一样的现象</b> ——「失败了」不等于「产品坏了」。</p>
+</div>
+
+<h2>五、验证证据</h2>
+
+<table>
+  <tr><th>验证</th><th>命令 / 方式</th><th>结果</th></tr>
+  <tr><td>A6 验收</td><td>中文字符扫描 <code>mailbox.js</code> + <code>modals/mailbox.twig</code></td><td>0 处</td></tr>
+  <tr><td>A6 渲染</td><td>真实 Twig × en-gb/zh-cn/zh-tw</td><td>26/26 通过</td></tr>
+  <tr><td>A7 纯函数</td><td><code>php .github/scripts/test-domain-health.php</code></td><td>60/60</td></tr>
+  <tr><td>DNS 解析</td><td><code>php .github/scripts/test-dns-parse.php</code></td><td>32/32</td></tr>
+  <tr><td>既有回归</td><td><code>test-runner.php</code> / <code>test-lang-fallback.php</code></td><td>exit 0 / exit 0</td></tr>
+  <tr><td>bridge</td><td><code>python3 helper-scripts/cf-email-bridge/test_bridge.py</code></td><td>24/24</td></tr>
+  <tr><td>A10 真实容器</td><td><code>postmap -q &lt;sender&gt; mysql:…</code>（重建镜像后的真容器）</td><td>四场景全对 + 回归无变化</td></tr>
+  <tr><td>A5 性能</td><td>清 redis 缓存 + 重启 unbound 制造真冷，跑端点</td><td>冷 8.63 s / 热 0.68 s</td></tr>
+  <tr><td>端点 E2E</td><td>以 admin 会话真实执行端点（真实 DNS）</td><td>13/13 断言通过</td></tr>
+</table>
+
+<div class="card">
+<h3>A10 的四场景对照（真实容器）</h3>
+<table>
+  <tr><th>场景</th><th>结果</th><th></th></tr>
+  <tr><td>邮箱中继 <code>:465</code> / 域中继 2525</td><td><code>smtp_cf465:…:465</code></td><td>✅</td></tr>
+  <tr><td>邮箱中继 2525 / 域中继 <code>:465</code></td><td><code>smtp:…:2525</code></td><td>✅</td></tr>
+  <tr><td>域级 <code>:465</code>（对照）</td><td><code>smtp_cf465:…:465</code></td><td>✅</td></tr>
+  <tr><td>现有 <code>cf-bridge:2526</code>（回归）</td><td><code>smtp:cf-bridge:2526</code></td><td>✅ 无变化</td></tr>
+</table>
+<p>修复前的实现比「完全没有这个分支」的基线<b>还差</b> —— 它会给 2525 端口启用隐式 TLS。</p>
+</div>
+
+<h2>六、还没做的（诚实清单）</h2>
+
+<table>
+  <tr><th>项</th><th>状态</th><th>原因 / 缺口</th></tr>
+  <tr><td>A5 冷路径 ≤ 8 s</td><td><span class="tag todo">部分达标</span></td><td>实测 8.63 s。剩余 ~5 s 是 RDAP 外部 HTTPS（第三方，无法压缩），~2.5 s 是 RBL 批次尾部</td></tr>
+  <tr><td>生产部署</td><td><span class="tag blocked">阻塞</span></td><td>本机没有 <code>15.204.205.80</code> 的 SSH 凭据</td></tr>
+  <tr><td>真实 465 中继端到端投递</td><td><span class="tag blocked">未做</span></td><td>需要一台真实的 <code>:465</code> 中继；本地只验证到「transport 选择正确 + 配置自检通过」</td></tr>
+  <tr><td>按钮处理器审计脚本</td><td><span class="tag todo">仍缺</span></td><td>SOP 提到但仓库里没有脚本；「47 个控件全有处理器」是一次性人工核对，下次改模板无法自动复验</td></tr>
+  <tr><td>域名体检批量模式</td><td><span class="tag todo">无调用方</span></td><td><code>?domains=</code> / <code>?all=1</code> / <code>format=json</code> 没有任何前端调用方</td></tr>
+  <tr><td>Windows 上构建镜像</td><td><span class="tag todo">需注意</span></td><td>构建前必须把 <code>data/Dockerfiles/**</code> 的行尾归一为 LF</td></tr>
+</table>
+
+<section class="quiz">
+  <h2 style="margin-top:6px">变更测验</h2>
+  <p class="sub">共 12 题，全部答对才算通过。选错会有解释。</p>
+
+  <div class="q" data-a="c">
+    <div class="stem">1. 容器里 <code>postconf -M | grep cf465</code> 能看到 <code>smtp_cf465</code> 连接器，为什么说这个「功能」其实不存在？</div>
+    <label><input type="radio" name="q1" value="a"> 因为连接器名字写错了</label>
+    <label><input type="radio" name="q1" value="b"> 因为 master.cf 没被挂载</label>
+    <label><input type="radio" name="q1" value="c"> 因为连接器来自 bind mount 的 master.cf（所以看得到），但<b>选择它的逻辑在 postfix.sh 生成的 .cf 里</b>，而 postfix.sh 是打进镜像的 —— 镜像是 ghcr 预构建的，compose 没有 <code>build:</code> 段</label>
+    <div class="why">「配置在」不等于「功能在」。要查一个改动是否真的生效，必须一路追到<b>运行时真正读了哪个文件</b>。</div>
+  </div>
+
+  <div class="q" data-a="b">
+    <div class="stem">2. 要在默认部署里让仓库的 <code>data/Dockerfiles/**</code> 生效，正确做法是？</div>
+    <label><input type="radio" name="q2" value="a"> 直接重启容器</label>
+    <label><input type="radio" name="q2" value="b"> 从 <code>helper-scripts/docker-compose.override.yml.d/BUILD_FLAGS</code> 复制 override（或只给该服务加 <code>build:</code>），然后 <code>docker compose build</code> + 重建容器</label>
+    <label><input type="radio" name="q2" value="c"> 把文件挂载进容器</label>
+    <div class="why">不启用 <code>build:</code> 的话，镜像永远来自 registry，本地源码改一百遍也不会进容器。</div>
+  </div>
+
+  <div class="q" data-a="a">
+    <div class="stem">3. 为什么在 Windows 检出上重建镜像会导致容器 <code>exit 127</code>，而 Linux 上没事？</div>
+    <label><input type="radio" name="q3" value="a"> 因为 <code>core.autocrlf=true</code> 让工作区文件变成 CRLF，<code>#!/bin/bash\r</code> 使 exec 失败；但 <b>git 索引里存的是 LF</b>，Linux 检出拿到的是 LF</label>
+    <label><input type="radio" name="q3" value="b"> 因为 Windows 不支持 Docker</label>
+    <label><input type="radio" name="q3" value="c"> 因为 Dockerfile 里没 chmod +x</label>
+    <div class="why">Dockerfile 里确实 <code>chmod +x</code> 了，所以不是权限问题 —— 是 shebang 行末尾多了 <code></code>，解释器路径变成 <code>/bin/bash</code>。</div>
+  </div>
+
+  <div class="q" data-a="c">
+    <div class="stem">4. 修复前那版 transport 判定，为什么说它「比什么都不做还差」？</div>
+    <label><input type="radio" name="q4" value="a"> 因为它让邮件重复发送</label>
+    <label><input type="radio" name="q4" value="b"> 因为它删掉了原有连接器</label>
+    <label><input type="radio" name="q4" value="c"> 因为它只看 <code>domain.relayhost</code>，而 nexthop 是「邮箱级优先」。两者不一致时会<b>给普通端口启用隐式 TLS</b>（或对 465 发明文）—— 实测把「原本能通」的场景弄成了失败</label>
+    <div class="why">TLS 方式必须跟随<b>实际选中的下一跳</b>，所以判定要用同一个 COALESCE。</div>
+  </div>
+
+  <div class="q" data-a="b">
+    <div class="stem">5. <code>catch (Exception $e)</code> 为什么拦不住 <code>$redis = null</code> 时的 <code>$redis-&gt;hGet()</code>？</div>
+    <label><input type="radio" name="q5" value="a"> 因为 <code>$redis</code> 是全局变量</label>
+    <label><input type="radio" name="q5" value="b"> 因为那抛的是 <code>Error</code>，PHP 8 里 <code>Error</code> 与 <code>Exception</code> 是<b>平行</b>的两支，共同祖先是 <code>Throwable</code></label>
+    <label><input type="radio" name="q5" value="c"> 因为 try 块里不能调方法</label>
+    <div class="why">所以那处缺陷一直没被发现 —— 直到真跑端点才 Fatal。要抓「任何」错误得用 <code>catch (Throwable)</code>。</div>
+  </div>
+
+  <div class="q" data-a="c">
+    <div class="stem">6. 域名体检原来 33.8 秒，主要时间花在哪？</div>
+    <label><input type="radio" name="q6" value="a"> PHP 代码本身慢</label>
+    <label><input type="radio" name="q6" value="b"> MySQL 查询慢</label>
+    <label><input type="radio" name="q6" value="c"> <b>DNS 解析链路</b>：十几个名字在冷状态下逐个串行查，且容器内解析器（unbound / 内嵌）在冷状态下对并发查询几乎不回应</label>
+    <div class="why">定位手法是<b>逐层计时</b> + <b>对照实验</b>（同一批查询分别发到三种解析器），而不是猜。</div>
+  </div>
+
+  <div class="q" data-a="a">
+    <div class="stem">7. 实测「并发 5 个查询到 unbound 只回来 1 个」，说明什么？</div>
+    <label><input type="radio" name="q7" value="a"> unbound 能串行服务但<b>不并发应答同一来源的多个在途 UDP 查询</b>，所以体检页这种「一次十几并发」的用法不该走它</label>
+    <label><input type="radio" name="q7" value="b"> unbound 坏了</label>
+    <label><input type="radio" name="q7" value="c"> UDP 不可靠，属于正常丢包</label>
+    <div class="why">同一批查询串行发给它时 5/5 全中、耗时 0.16 s —— 证明不是坏了，是并发模型不匹配。</div>
+  </div>
+
+  <div class="q" data-a="b">
+    <div class="stem">8. <code>socket_select</code> 返回某个 fd 可读后，为什么必须<b>循环排空</b>它？</div>
+    <label><input type="radio" name="q8" value="a"> 为了省内存</label>
+    <label><input type="radio" name="q8" value="b"> 因为该 fd 的接收缓冲里可能排着多个应答；只读一次的话剩下的包会滞留，而下一轮 select 未必再报这个 fd → <b>间歇性丢结果</b></label>
+    <label><input type="radio" name="q8" value="c"> 因为 UDP 会重传</label>
+    <div class="why">症状极具迷惑性：同一批查询「一次全中、一次全空」，看起来像网络抖动。</div>
+  </div>
+
+  <div class="q" data-a="c">
+    <div class="stem">9. 为什么「并发等待窗口」要用固定小值（如 200 ms），而不是用「剩余总时长」？</div>
+    <label><input type="radio" name="q9" value="a"> 为了省 CPU</label>
+    <label><input type="radio" name="q9" value="b"> 因为 select 不接受大值</label>
+    <label><input type="radio" name="q9" value="c"> 因为一旦某轮阻塞很久，排队的查询就一直发不出去，最后<b>整批一起超时</b></label>
+    <div class="why">发送节奏不能被「等应答」的阻塞时长绑架 —— 这是把「发送」与「等待」解耦。</div>
+  </div>
+
+  <div class="q" data-a="a">
+    <div class="stem">10. 新增的 <code>test-dns-parse.php</code> 用<b>手工合成的报文</b>而不是真实网络请求，主要理由是什么？</div>
+    <label><input type="radio" name="q10" value="a"> 因为解析错了的表现是「这个名单没查到」，看起来像「IP 干净」—— 这类 bug 会被网络抖动掩盖，必须用确定性的合成输入覆盖畸形/边界情况</label>
+    <label><input type="radio" name="q10" value="b"> 因为 CI 里没有网络</label>
+    <label><input type="radio" name="q10" value="c"> 因为合成报文更快</label>
+    <div class="why">「CI 没网络」是顺带的好处，核心理由是<b>可确定复现</b>：NXDOMAIN、SERVFAIL、截断、自指压缩指针这些真实网络里偶发的情况，合成报文可以稳定测。</div>
+  </div>
+
+  <div class="q" data-a="b">
+    <div class="stem">11. 我在这轮里「测试脚本自己写错 3 处」这件事，最该记住的教训是？</div>
+    <label><input type="radio" name="q11" value="a"> 应该少写测试</label>
+    <label><input type="radio" name="q11" value="b"> 「测试失败」不等于「产品坏了」—— 测试本身也是代码，也会错；断言写错会造成和代码错一模一样的现象，必须先用<b>已知答案</b>校验测试</label>
+    <label><input type="radio" name="q11" value="c"> 应该只写简单测试</label>
+    <div class="why">所以我在验证 DNS 原语时特意加了「Spamhaus 已知测试码必须能解析」这类<b>已知答案</b>断言。</div>
+  </div>
+
+  <div class="q" data-a="c">
+    <div class="stem">12. 这轮把「纯函数抽出来」和「真跑端点」分成两步做，为什么？</div>
+    <label><input type="radio" name="q12" value="a"> 为了少写代码</label>
+    <label><input type="radio" name="q12" value="b"> 因为端点太慢</label>
+    <label><input type="radio" name="q12" value="c"> 因为两者证明的是<b>不同的事</b>：单元测试证明「判定逻辑没坏」，端点测试才能证明「<code>require</code> 路径对、常量没重复定义、函数签名对得上、redis 不可用时不崩」—— redis 那处缺陷正是后者才暴露的</label>
+    <div class="why">只做前者会得到一个「测试全绿但页面 500」的假象。</div>
+  </div>
+
+  <button id="submit">提交答卷</button>
+  <button id="reset" class="ghost" style="margin-left:8px">重做</button>
+  <div id="verdict"></div>
+</section>
+
+</div>
+<script>
+(function () {
+  var qs = Array.prototype.slice.call(document.querySelectorAll('.q'));
+
+  function grade() {
+    var wrong = 0, answered = 0;
+    qs.forEach(function (q) {
+      var want = q.getAttribute('data-a');
+      var picked = q.querySelector('input:checked');
+      var why = q.querySelector('.why');
+      q.querySelectorAll('label').forEach(function (l) {
+        l.classList.remove('right', 'wrong');
+      });
+      if (!picked) { return; }
+      answered++;
+      var lbl = picked.closest('label');
+      if (picked.value === want) {
+        lbl.classList.add('right');
+        why.classList.remove('show');
+      } else {
+        lbl.classList.add('wrong');
+        q.querySelector('input[value="' + want + '"]').closest('label').classList.add('right');
+        why.classList.add('show');
+        wrong++;
+      }
+    });
+    var v = document.getElementById('verdict');
+    if (answered < qs.length) {
+      v.className = 'fail';
+      v.textContent = '还有 ' + (qs.length - answered) + ' 题没作答。全部答完才能判定。';
+      return;
+    }
+    if (wrong === 0) {
+      v.className = 'pass';
+      v.textContent = '✓ 通过（' + qs.length + '/' + qs.length + '）。你已经掌握这次变更的关键判断。';
+    } else {
+      v.className = 'fail';
+      v.textContent = '✗ 未通过：答错 ' + wrong + ' 题。请阅读上方红色解释后重做。';
+    }
+  }
+
+  document.getElementById('submit').addEventListener('click', grade);
+  document.getElementById('reset').addEventListener('click', function () {
+    qs.forEach(function (q) {
+      q.querySelectorAll('input').forEach(function (i) { i.checked = false; });
+      q.querySelectorAll('label').forEach(function (l) { l.classList.remove('right', 'wrong'); });
+      q.querySelector('.why').classList.remove('show');
+    });
+    document.getElementById('verdict').className = '';
+    document.getElementById('verdict').textContent = '';
+  });
+})();
+</script>
+</body>
+</html>

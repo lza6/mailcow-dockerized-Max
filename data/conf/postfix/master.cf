@@ -81,9 +81,12 @@ smtp_enforced_tls      unix  -       -       n       -       -       smtp
 smtp_via_transport_maps      unix  -       -       n       -       -       smtp
   -o smtp_sasl_password_maps=proxy:mysql:/opt/postfix/conf/sql/mysql_sasl_passwd_maps_transport_maps.cf
 
-# Cloudflare Email Sending relay (only supports implicit TLS on port 465)
-# Used by setting a relayhost of "smtp.mx.cloudflare.net:465" and a
-# transport_maps entry matching the sender domain to "smtp_cf465:".
+# 465 隐式 TLS 连接器（smtp_tls_wrappermode=yes）。
+#
+# 名字里的 cf 是历史包袱：它不是 Cloudflare 专用连接器 —— 凡「只接受隐式 TLS」的
+# 465 中继都必须走这里（Cloudflare Email Sending、Gmail 587/465、任意自建 465 都一样）。
+# 判定依据是「实际选中的 nexthop 是否以 :465 结尾」，而不是服务商名字，
+# 见 data/Dockerfiles/postfix/postfix.sh 中 sender_dependent_default_transport_maps 的说明。
 smtp_cf465      unix  -       -       n       -       -       smtp
   -o smtp_tls_security_level=encrypt
   -o smtp_tls_wrappermode=yes

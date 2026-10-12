@@ -19,10 +19,11 @@
 
 require_once $_SERVER['DOCUMENT_ROOT'] . '/inc/prerequisites.inc.php';
 
-define('DHC_OK',   '<span class="badge bg-success">正常</span>');
-define('DHC_WARN', '<span class="badge bg-warning text-dark">注意</span>');
-define('DHC_BAD',  '<span class="badge bg-danger">异常</span>');
-define('DHC_UNK',  '<span class="badge bg-secondary">未知</span>');
+// 纯函数库（无 I/O）。放在非 lib/ 路径，保证被 CI 的 php -l 全量扫描覆盖。
+require_once __DIR__ . '/../domain_health_lib.inc.php';
+
+// 并发 DNS（只做网络 I/O）。RBL 有 13 个名单，串行在冷路径要 21 秒以上。
+require_once __DIR__ . '/../dns_parallel.inc.php';
 
 if (!isset($_SESSION['mailcow_cc_role']) ||
     !in_array($_SESSION['mailcow_cc_role'], array('admin', 'domainadmin'), true)) {
@@ -32,18 +33,26 @@ if (!isset($_SESSION['mailcow_cc_role']) ||
 }
 
 $domain = isset($_GET['domain']) ? trim($_GET['domain']) : '';
-if ($domain === '' || !is_valid_domain_name($domain)) {
-  http_response_code(400);
-  echo 'Invalid domain';
-  exit();
-}
 
-if ($_SESSION['mailcow_cc_role'] === 'domainadmin') {
-  $allowed = mailbox('get', 'domain_details', $domain);
-  if ($allowed === false) {
-    http_response_code(403);
-    echo 'No such domain in context';
+// 批量体检不需要单域参数，因此单域校验必须放在批量判定之后，
+// 否则 ?all=1 会先被下面的 "Invalid domain" 拦掉。
+$batch_requested = (isset($_GET['domains']) && trim((string)$_GET['domains']) !== '')
+                || (isset($_GET['all']) && $_GET['all'] == '1');
+
+if (!$batch_requested) {
+  if ($domain === '' || !is_valid_domain_name($domain)) {
+    http_response_code(400);
+    echo 'Invalid domain';
     exit();
+  }
+
+  if ($_SESSION['mailcow_cc_role'] === 'domainadmin') {
+    $allowed = mailbox('get', 'domain_details', $domain);
+    if ($allowed === false) {
+      http_response_code(403);
+      echo 'No such domain in context';
+      exit();
+    }
   }
 }
 
@@ -51,128 +60,108 @@ if ($_SESSION['mailcow_cc_role'] === 'domainadmin') {
  * 辅助函数
  * ------------------------------------------------------------------ */
 
-function dhc_txt($name) {
-  $out = array();
-  $recs = @dns_get_record($name, DNS_TXT);
-  if (is_array($recs)) {
-    foreach ($recs as $r) {
-      if (isset($r['txt'])) {
-        $out[] = $r['txt'];
-      } elseif (isset($r['entries']) && is_array($r['entries'])) {
-        $out[] = implode('', $r['entries']);
-      }
-    }
-  }
-  return $out;
-}
-
-function dhc_a($name) {
-  $out = array();
-  $recs = @dns_get_record($name, DNS_A);
-  if (is_array($recs)) {
-    foreach ($recs as $r) {
-      if (!empty($r['ip'])) {
-        $out[] = $r['ip'];
-      }
-    }
-  }
-  return $out;
-}
-
-function dhc_mx($name) {
-  $out = array();
-  $recs = @dns_get_record($name, DNS_MX);
-  if (is_array($recs)) {
-    foreach ($recs as $r) {
-      if (!empty($r['target'])) {
-        $out[] = strtolower(rtrim($r['target'], '.'));
-      }
-    }
-  }
-  return $out;
-}
-
 function dhc_ptr($ip) {
-  $recs = @dns_get_record(implode('.', array_reverse(explode('.', $ip))) . '.in-addr.arpa', DNS_PTR);
-  if (is_array($recs)) {
-    foreach ($recs as $r) {
-      if (!empty($r['target'])) {
-        return strtolower(rtrim($r['target'], '.'));
-      }
-    }
-  }
-  return null;
-}
-
-/** 对外部 DNS 做一次查询（绕过本地 unbound 缓存），失败回退到系统解析器 */
-function dhc_resolve_external($name, $type) {
-  $map = array('TXT' => DNS_TXT, 'A' => DNS_A, 'MX' => DNS_MX, 'PTR' => DNS_PTR);
-  if (!isset($map[$type])) {
-    return array();
-  }
-  if (function_exists('dns_get_record')) {
-    $recs = @dns_get_record($name, $map[$type]);
-    return is_array($recs) ? $recs : array();
-  }
-  return array();
-}
-
-/** 本机出口 IPv4 */
-function dhc_public_ipv4() {
-  $ch = curl_init('http://ip4.mailcow.email');
-  curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-  curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-  curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 4);
-  curl_setopt($ch, CURLOPT_TIMEOUT, 6);
-  $ip = trim((string)curl_exec($ch));
-  curl_close($ch);
-  return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) ? $ip : null;
+  // 走并发原语（同一套解析器选择逻辑）：容器解析器在冷状态下这条查询实测要 7.5 秒，
+  // 直连公共解析器只需 ~0.15 秒。单条查询也用批量接口，避免两套解析路径不一致。
+  $rev = implode('.', array_reverse(explode('.', (string)$ip))) . '.in-addr.arpa';
+  $r = dhc_dns_query_batch_typed(array(array('name' => $rev, 'type' => 12)));
+  $vals = isset($r[$rev . '|12']['PTR']) ? $r[$rev . '|12']['PTR'] : array();
+  return empty($vals) ? null : $vals[0];
 }
 
 /**
- * 域名注册日期 -> 天数。
- * 通过 RDAP 获取（权威、无需 API key）。.com/.net 走 Verisign。
- * 失败返回 null，界面上显示"未知"，不猜测。
+ * 组装 RDAP 请求描述（不发出），交给 dhc_http_multi 与其他外部请求一起并发。
+ * 这样「取出口 IP」和「查域龄」两个 HTTPS 往返只花一个的时间。
  */
-function dhc_domain_age_days($domain) {
+function dhc_rdap_request($domain) {
+  $tld = strtolower(substr(strrchr((string)$domain, '.'), 1));
+  $bases = array(
+    'com' => 'https://rdap.verisign.com/com/v1/domain/',
+    'net' => 'https://rdap.verisign.com/net/v1/domain/',
+  );
+  return array(
+    'url'         => (isset($bases[$tld]) ? $bases[$tld] : 'https://rdap.org/domain/') . rawurlencode((string)$domain),
+    'timeout'     => 12,
+    'follow'      => true,
+    'headers'     => array('Accept: application/rdap+json'),
+  );
+}
+
+/**
+ * 并发发出多个 HTTP 请求（curl_multi）。
+ *
+ * 为什么需要：单域体检要发两个外部 HTTPS —— 出口 IP 探测与 RDAP 域龄，
+ * 实测各约 2.5s / 5s。串行做就是 7.5s，而这页本身已经因为 DNS 很慢了。
+ *
+ * @param array $reqs  key => ['url'=>..,'timeout'=>..,'follow'=>bool,'headers'=>[]]
+ * @return array       key => ['code'=>int,'body'=>string,'error'=>string]
+ */
+function dhc_http_multi(array $reqs) {
+  $out = array();
+  if (empty($reqs) || !function_exists('curl_multi_init')) {
+    foreach (array_keys($reqs) as $k) { $out[$k] = array('code' => 0, 'body' => '', 'error' => 'curl unavailable'); }
+    return $out;
+  }
+
+  $mh = curl_multi_init();
+  $handles = array();
+  foreach ($reqs as $k => $r) {
+    $ch = curl_init((string)$r['url']);
+    curl_setopt_array($ch, array(
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_FOLLOWLOCATION => !empty($r['follow']),
+      CURLOPT_MAXREDIRS      => 4,
+      CURLOPT_CONNECTTIMEOUT => 5,
+      CURLOPT_TIMEOUT        => isset($r['timeout']) ? (int)$r['timeout'] : 10,
+      CURLOPT_USERAGENT      => 'mailcow-domain-health',
+      CURLOPT_HTTPHEADER     => isset($r['headers']) ? $r['headers'] : array(),
+    ));
+    curl_multi_add_handle($mh, $ch);
+    $handles[$k] = $ch;
+  }
+
+  $running = null;
+  do {
+    $status = curl_multi_exec($mh, $running);
+    if ($running) { curl_multi_select($mh, 0.5); }
+  } while ($running && $status === CURLM_OK);
+
+  foreach ($handles as $k => $ch) {
+    $body = curl_multi_getcontent($ch);
+    $out[$k] = array(
+      'code'  => (int)curl_getinfo($ch, CURLINFO_HTTP_CODE),
+      'body'  => is_string($body) ? $body : '',
+      'error' => (string)curl_error($ch),
+    );
+    curl_multi_remove_handle($mh, $ch);
+    curl_close($ch);
+  }
+  curl_multi_close($mh);
+  return $out;
+}
+
+/**
+ * 由 RDAP 响应算出域名年龄（天）。带 24 小时缓存 —— 注册日期不会天天变。
+ * @param array $resp dhc_http_multi 的单项结果
+ * @return int|null 天；拿不到返回 null（界面显示"未知"，不猜）
+ */
+function dhc_domain_age_from_response($domain, $resp) {
   $cache_key = 'DHC_RDAP/' . $domain;
   global $redis;
   if ($redis) {
     $cached = $redis->get($cache_key);
     if ($cached !== false && $cached !== null) {
       $d = json_decode($cached, true);
-      if (is_array($d) && isset($d['registered'])) {
+      if (is_array($d) && array_key_exists('registered', $d)) {
         return $d['registered'] ? intdiv(time() - (int)$d['registered'], 86400) : null;
       }
     }
   }
 
-  $tld = strtolower(substr(strrchr($domain, '.'), 1));
-  $bases = array(
-    'com' => 'https://rdap.verisign.com/com/v1/domain/',
-    'net' => 'https://rdap.verisign.com/net/v1/domain/',
-  );
-  $base = isset($bases[$tld]) ? $bases[$tld] : 'https://rdap.org/domain/';
-  $url  = $base . rawurlencode($domain);
-
-  $ch = curl_init($url);
-  curl_setopt_array($ch, array(
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_FOLLOWLOCATION => true,
-    CURLOPT_MAXREDIRS      => 4,
-    CURLOPT_CONNECTTIMEOUT => 5,
-    CURLOPT_TIMEOUT        => 12,
-    CURLOPT_USERAGENT      => 'mailcow-domain-health',
-    CURLOPT_HTTPHEADER     => array('Accept: application/rdap+json'),
-  ));
-  $body = curl_exec($ch);
-  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-  curl_close($ch);
-
   $registered = null;
   $registrar  = null;
-  if ($body !== false && $code === 200) {
-    $j = json_decode($body, true);
+  if (isset($resp['body']) && $resp['body'] !== '' && (int)($resp['code'] ?? 0) === 200) {
+    $j = json_decode($resp['body'], true);
     if (is_array($j)) {
       foreach ((array)($j['events'] ?? array()) as $ev) {
         if (($ev['eventAction'] ?? '') === 'registration' && !empty($ev['eventDate'])) {
@@ -182,9 +171,7 @@ function dhc_domain_age_days($domain) {
       foreach ((array)($j['entities'] ?? array()) as $ent) {
         if (in_array('registrar', (array)($ent['roles'] ?? array()), true)) {
           foreach ((array)($ent['vcardArray'][1] ?? array()) as $v) {
-            if (($v[0] ?? '') === 'fn' && !empty($v[3])) {
-              $registrar = $v[3];
-            }
+            if (($v[0] ?? '') === 'fn' && !empty($v[3])) { $registrar = $v[3]; }
           }
         }
       }
@@ -192,12 +179,43 @@ function dhc_domain_age_days($domain) {
   }
 
   if ($redis) {
-    $redis->setex($cache_key, 86400, json_encode(array(
-      'registered' => $registered,
-      'registrar'  => $registrar,
-    )));
+    // 只缓存「成功拿到日期」的结果：查失败时缓存 null 会把一次偶发故障固化 24 小时
+    if ($registered) {
+      $redis->setex($cache_key, 86400, json_encode(array(
+        'registered' => $registered,
+        'registrar'  => $registrar,
+      )));
+    }
   }
   return $registered ? intdiv(time() - $registered, 86400) : null;
+}
+
+/** 从并发批次里取某名字某类型的值（取不到返回空数组） */
+function dhc_batch_get($dns, $name, $type) {
+  $k = (string)$name . '|' . (int)$type;
+  return isset($dns[$k][$type]) ? $dns[$k][$type] : array();
+}
+function dhc_txt_of_batch($dns, $name) { return dhc_batch_get($dns, $name, 16); }
+function dhc_a_of_batch($dns, $name)   { return dhc_batch_get($dns, $name, 1); }
+
+/** PTR 查询（带 24h 缓存：出口 IP 的反解不会频繁变） */
+function dhc_ptr_cached($ip) {
+  $cache_key = 'DHC_PTR/' . $ip;
+  global $redis;
+  if ($redis) {
+    $cached = $redis->get($cache_key);
+    if ($cached !== false && $cached !== null) {
+      $d = json_decode($cached, true);
+      if (is_array($d) && array_key_exists('ptr', $d)) {
+        return $d['ptr'] !== '' ? $d['ptr'] : null;
+      }
+    }
+  }
+  $ptr = dhc_ptr($ip);
+  if ($redis) {
+    $redis->setex($cache_key, 86400, json_encode(array('ptr' => $ptr === null ? '' : $ptr)));
+  }
+  return $ptr;
 }
 
 /**
@@ -205,6 +223,22 @@ function dhc_domain_age_days($domain) {
  * 这不是"被列入"，必须单独识别，否则会误报。
  */
 function dhc_rbl_check($ip) {
+  // 13 个名单 × 逐条 DNS 查询，实测约 21.6 秒，是本页最大的耗时来源。
+  // 缓存 1 小时：既把重复查询降到接近 0，也避免批量体检时连续撞各名单的
+  // 查询频率限制（Spamhaus 等对公共解析器会返回 127.255.255.x 拒绝服务）。
+  $cache_key = 'DHC_RBL/' . $ip;
+  global $redis;
+  if ($redis) {
+    $cached = $redis->get($cache_key);
+    if ($cached !== false && $cached !== null) {
+      $d = json_decode($cached, true);
+      if (is_array($d) && isset($d['listed'], $d['refused'])) {
+        $d['cached'] = true;
+        return $d;
+      }
+    }
+  }
+
   $rev = implode('.', array_reverse(explode('.', $ip)));
   $zones = array(
     'zen.spamhaus.org'        => 'Spamhaus ZEN',
@@ -223,24 +257,36 @@ function dhc_rbl_check($ip) {
   );
   $listed = array();
   $refused = array();
+  // 并发查询：13 个名单串行时冷路径实测 21.6 秒（单个名字最慢 5.8s），
+  // 改成同时发出后整体降到「最慢那一个」的量级。
+  // 失败/超时的名字会以空数组返回，语义与串行版的 "continue" 一致。
+  $answers = dhc_dns_query_a_batch(
+    array_map(function ($z) use ($rev) { return $rev . '.' . $z; }, array_keys($zones))
+  );
   foreach ($zones as $zone => $label) {
-    $res = @dns_get_record($rev . '.' . $zone, DNS_A);
-    if (!is_array($res) || empty($res)) {
+    $ips = isset($answers[$rev . '.' . $zone]) ? $answers[$rev . '.' . $zone] : array();
+    if (empty($ips)) {
       continue;
     }
-    foreach ($res as $r) {
-      if (empty($r['ip'])) {
-        continue;
-      }
-      // 127.255.255.x = 查询被拒（非列入）
-      if (strpos($r['ip'], '127.255.255.') === 0) {
+    foreach ($ips as $ip) {
+      // 127.255.255.x = 查询被拒（非列入）—— 判定见 dhc_rbl_classify()
+      if (dhc_rbl_classify($ip) === 'refused') {
         $refused[] = $label;
       } else {
-        $listed[] = $label . ' (' . $r['ip'] . ')';
+        $listed[] = $label . ' (' . $ip . ')';
       }
     }
   }
-  return array('listed' => $listed, 'refused' => $refused);
+  $out = array(
+    'listed'  => $listed,
+    'refused' => $refused,
+    'zones'   => count($zones),
+    'cached'  => false,
+  );
+  if ($redis) {
+    $redis->setex($cache_key, 3600, json_encode($out));
+  }
+  return $out;
 }
 
 /** 本机 rspamd 最近对该域的出站打分（取最高分的一条） */
@@ -280,37 +326,91 @@ function dhc_rspamd_scores($domain) {
 }
 
 /* ------------------------------------------------------------------ *
- * 采集
+ * 采集（按域）—— 单域视图与批量体检共用同一实现
  * ------------------------------------------------------------------ */
 
-$row = array();
+/**
+ * 采集一个域的全部原始诊断数据（只采集，不判定、不渲染）。
+ *
+ * 返回的键名与原局部变量一致，便于 dhc_build_checks() 直接取用。
+ * 采集与判定分离，是为了让同一份数据既能渲染 HTML，也能输出 JSON、
+ * 或用于批量体检，而不必重复实现检查逻辑。
+ */
+function dhc_collect($domain) {
+  global $redis;
 
-// 1. SPF
-$domain_txts = dhc_txt($domain);
-$spf = null;
-foreach ($domain_txts as $t) {
-  if (stripos($t, 'v=spf1') === 0) {
-    $spf = $t;
-    break;
+// 0. 先并行启动「出口 IP 探测」——它是一个外部 HTTPS 请求（冷路径实测 2.5s）。
+//    PHP 单线程，没法与后面的 DNS 真正并行，但可以用 curl_multi 把
+//    「取出口 IP」与「域名年龄 RDAP」两个外部 HTTP 一起发出去，
+//    省掉一次完整往返。DNS 部分则由 dns_parallel 批量并发。
+$ext = dhc_http_multi(array(
+  'pubip' => array('url' => 'http://ip4.mailcow.email', 'timeout' => 6),
+  'rdap'  => dhc_rdap_request($domain),
+));
+
+// 1. 把本域需要的**所有 DNS 查询**收集成一个批次，一次性并发发出。
+//    冷路径下每个名字首次解析要 0.3–2.7 秒，串行做十几条就是十几秒。
+//    同一个名字的多种类型（如根的 A 与 TXT）用不同 key 并存，互不覆盖。
+$q = array(
+  array('name' => $domain,          'type' => 16),   // TXT  → SPF
+  array('name' => '_dmarc.' . $domain, 'type' => 16), // TXT  → DMARC
+  array('name' => $domain,          'type' => 15),   // MX
+  array('name' => $domain,          'type' => 1),    // A    → 网站可达性
+  array('name' => 'www.' . $domain, 'type' => 1),    // A    → www
+);
+
+// DKIM selector 要从 redis 取，取到才有对应的 TXT 名字
+$dkim_selector = null;
+// 必须判空：本文件其余 redis 调用都有 `if ($redis)` 保护，只有这里曾经漏了。
+// 而且 `$redis` 为 null 时抛的是 `Error`（不是 `Exception`），只 catch Exception
+// 拦不住，结果是整个诊断页 Fatal error —— 偏偏这是出问题时最该能打开的页面。
+if ($redis) {
+  try {
+    $dkim_selector = $redis->hGet('DKIM_SELECTORS', $domain);
+  } catch (Throwable $e) {
+    error_log('domain_health: redis hGet(DKIM_SELECTORS) failed: ' . get_class($e) . ' ' . $e->getMessage());
+    $dkim_selector = null;
   }
+}
+if ($dkim_selector) {
+  $dkim_dns = $dkim_selector . '._domainkey.' . $domain;
+  $q[] = array('name' => $dkim_dns, 'type' => 16);
+} else {
+  $dkim_dns = null;
+}
+
+$dns = dhc_dns_query_batch_typed($q);
+
+// 出口 IP 拿到后才能查 PTR 与 13 个 RBL 名单 —— 这是第二批（也并发）
+$pubip = null;
+if (!empty($ext['pubip']['body'])) {
+  $cand = trim((string)$ext['pubip']['body']);
+  if (filter_var($cand, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) { $pubip = $cand; }
+}
+
+$rbl = array('listed' => array(), 'refused' => array(), 'zones' => 0, 'cached' => false);
+$ptr = null;
+if ($pubip) {
+  $ptr = dhc_ptr_cached($pubip);
+  $rbl = dhc_rbl_check($pubip);
+}
+
+// ---- 结果整理 ----
+// SPF
+$spf = null;
+foreach (dhc_txt_of_batch($dns, $domain) as $t) {
+  if (stripos($t, 'v=spf1') === 0) { $spf = $t; break; }
 }
 $spf_dns_lookups = $spf === null ? 0 : preg_match_all('/\b(include|a|mx|ptr|exists|redirect|exp)[:.\s]/i', $spf, $m);
 $spf_has_all_minus = $spf !== null && preg_match('/\s-all\s*$/i', trim($spf));
 $spf_has_all_soft  = $spf !== null && preg_match('/\s~all\s*$/i', trim($spf));
 
-// 2. DKIM（从 redis 取 selector，去 DNS 上核对公钥是否存在）
-$dkim_selector = null;
-try {
-  $dkim_selector = $redis->hGet('DKIM_SELECTORS', $domain);
-} catch (Exception $e) {
-  $dkim_selector = null;
-}
-$dkim_dns_name = null;
+// DKIM
+$dkim_dns_name = $dkim_dns;
 $dkim_published = false;
 $dkim_key_bits  = null;
-if ($dkim_selector) {
-  $dkim_dns_name = $dkim_selector . '._domainkey.' . $domain;
-  foreach (dhc_txt($dkim_dns_name) as $t) {
+if ($dkim_dns !== null) {
+  foreach (dhc_txt_of_batch($dns, $dkim_dns) as $t) {
     if (stripos($t, 'v=DKIM1') !== false || stripos($t, 'p=') !== false) {
       $dkim_published = true;
       if (preg_match('/p=([A-Za-z0-9+\/=]+)/', $t, $mm)) {
@@ -321,13 +421,10 @@ if ($dkim_selector) {
   }
 }
 
-// 3. DMARC
+// DMARC
 $dmarc = null;
-foreach (dhc_txt('_dmarc.' . $domain) as $t) {
-  if (stripos($t, 'v=DMARC1') === 0) {
-    $dmarc = $t;
-    break;
-  }
+foreach (dhc_txt_of_batch($dns, '_dmarc.' . $domain) as $t) {
+  if (stripos($t, 'v=DMARC1') === 0) { $dmarc = $t; break; }
 }
 $dmarc_policy = null;
 $dmarc_has_rua = false;
@@ -338,265 +435,160 @@ if ($dmarc !== null) {
   $dmarc_has_rua = stripos($dmarc, 'rua=') !== false;
 }
 
-// 4. MX
-$mxs = dhc_mx($domain);
+// MX（批次里存成 "10 mx.example.com"，与原 dns_get_record 的 target 语义对齐）
+$mxs = array();
+foreach (dhc_batch_get($dns, $domain, 15) as $rec) {
+  $parts = explode(' ', (string)$rec, 2);
+  if (!empty($parts[1])) { $mxs[] = strtolower(rtrim($parts[1], '.')); }
+}
 $hostname = strtolower((string)getenv('MAILCOW_HOSTNAME'));
 $mx_points_here = in_array($hostname, $mxs, true);
 
-// 5. 出口 IP + PTR
-$pubip = dhc_public_ipv4();
-$ptr = $pubip ? dhc_ptr($pubip) : null;
 $ptr_matches = $ptr !== null && $hostname !== '' && $ptr === $hostname;
 
-// 6. 黑名单
-$rbl = $pubip ? dhc_rbl_check($pubip) : array('listed' => array(), 'refused' => array());
+// 域名年龄（RDAP 已在上面与出口 IP 一起并发发出）
+$age_days = dhc_domain_age_from_response($domain, $ext['rdap']);
 
-// 7. 域名年龄
-$age_days = dhc_domain_age_days($domain);
-
-// 8. rspamd 实际打分
+// rspamd 实际打分
 $scores = dhc_rspamd_scores($domain);
 
-// 9. A 记录（网站可达性）
-$a_records     = dhc_a($domain);
-$www_records   = dhc_a('www.' . $domain);
+// A 记录（网站可达性）
+$a_records   = dhc_a_of_batch($dns, $domain);
+$www_records = dhc_a_of_batch($dns, 'www.' . $domain);
+
+  return compact(
+    'domain',
+    'spf', 'spf_dns_lookups', 'spf_has_all_minus', 'spf_has_all_soft',
+    'dkim_selector', 'dkim_dns_name', 'dkim_published', 'dkim_key_bits',
+    'dmarc', 'dmarc_policy', 'dmarc_has_rua',
+    'mxs', 'hostname', 'mx_points_here',
+    'pubip', 'ptr', 'ptr_matches',
+    'rbl', 'age_days', 'scores',
+    'a_records', 'www_records'
+  );
+}
+
+
+
+
+/* ------------------------------------------------------------------ *
+ * 主流程
+ * ------------------------------------------------------------------ */
+
+$format = isset($_GET['format']) ? strtolower(trim((string)$_GET['format'])) : 'html';
+
+// ---- 批量模式：?domains=a.com,b.com 或 ?all=1 ----
+$batch_raw  = isset($_GET['domains']) ? (string)$_GET['domains'] : '';
+$want_batch = ($batch_raw !== '') || (isset($_GET['all']) && $_GET['all'] == '1');
+
+if ($want_batch) {
+  if ($_SESSION['mailcow_cc_role'] !== 'admin') {
+    http_response_code(403);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(array('ok' => false, 'message' => 'batch requires admin'));
+    exit();
+  }
+
+  if ($batch_raw !== '') {
+    $want = array_values(array_filter(array_map('trim', explode(',', $batch_raw))));
+  } else {
+    $want = array();
+    $stmt = $pdo->query("SELECT `domain` FROM `domain` WHERE `active` = '1' ORDER BY `domain` ASC");
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $r) { $want[] = $r['domain']; }
+  }
+
+  // 单次最多处理这么多域。RBL 是逐条 DNS 查询（每域十几条），
+  // 一次跑完 15 个域会持续几十秒，且可能触发名单限流；
+  // 因此强制分片，由前端按片轮询，服务端每次只做一片。
+  $CHUNK = 3;
+  $total = count($want);
+  $want  = array_slice($want, 0, $CHUNK);
+
+  $out = array();
+  foreach ($want as $d) {
+    if (!is_valid_domain_name($d)) {
+      $out[] = array('domain' => $d, 'error' => 'invalid domain name');
+      continue;
+    }
+    // 单域失败不阻断整体
+    try {
+      $D = dhc_collect($d);
+      $checks = dhc_build_checks($D);
+      $out[] = array('domain' => $d, 'summary' => dhc_summarize($checks), 'checks' => $checks);
+    } catch (Exception $e) {
+      $out[] = array('domain' => $d, 'error' => 'check failed: ' . $e->getMessage());
+    } catch (Error $e) {
+      $out[] = array('domain' => $d, 'error' => 'check failed: ' . $e->getMessage());
+    }
+  }
+
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode(array(
+    'ok'         => true,
+    'chunk_size' => $CHUNK,
+    'total'      => $total,
+    'returned'   => count($out),
+    'results'    => $out,
+  ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  exit();
+}
+
+// ---- 单域 ----
+$D       = dhc_collect($domain);
+$checks  = dhc_build_checks($D);
+$summary = dhc_summarize($checks);
+
+if ($format === 'json') {
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode(array(
+    'ok'      => true,
+    'domain'  => $domain,
+    'summary' => $summary,
+    'checks'  => $checks,
+  ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  exit();
+}
 ?>
+<div class="mb-2">
+  <?php
+  $badge_cls = array('bad' => 'danger', 'warn' => 'warning text-dark',
+                     'unknown' => 'secondary', 'ok' => 'success');
+  $badge_lbl = array('bad' => '异常', 'warn' => '注意', 'unknown' => '未知', 'ok' => '正常');
+  foreach (array('bad', 'warn', 'unknown', 'ok') as $k): ?>
+    <span class="badge bg-<?=$badge_cls[$k]?>"><?=htmlspecialchars($badge_lbl[$k]);?> <?=(int)$summary[$k];?></span>
+  <?php endforeach; ?>
+</div>
 <div class="table-responsive">
   <table class="table table-striped">
     <tbody>
     <tr>
-      <th style="width:34%">检查项</th>
-      <th style="width:12%">状态</th>
-      <th>详情</th>
+      <th style="width:30%">检查项</th>
+      <th style="width:10%">状态</th>
+      <th>结论与依据</th>
     </tr>
-
-    <!-- SPF -->
+    <?php foreach ($checks as $c): ?>
     <tr>
-      <td>SPF（发件人策略）</td>
-      <td><?php
-        if ($spf === null) { echo DHC_BAD; }
-        elseif ($spf_has_all_minus || $spf_has_all_soft) { echo DHC_OK; }
-        else { echo DHC_WARN; }
-      ?></td>
+      <td><?=htmlspecialchars($c['name']);?></td>
+      <td><?=dhc_status_badge($c['status']);?></td>
       <td>
-        <?php if ($spf === null): ?>
-          <strong class="text-danger">未找到 SPF 记录</strong><br>
-          <small>没有 SPF 时，接收方无法验证你的发件来源，投递率会明显下降。</small>
-        <?php else: ?>
-          <code><?=htmlspecialchars($spf);?></code><br>
-          <small>
-            DNS 查询次数约 <strong><?=(int)$spf_dns_lookups;?></strong>（上限 10）<?php if ($spf_dns_lookups > 10): ?> <span class="text-danger">超限，接收方会报 permerror</span><?php endif; ?><br>
-            <?php if ($spf_has_all_minus): ?>
-              结尾 <code>-all</code>：未授权来源应被拒绝（严格，推荐）
-            <?php elseif ($spf_has_all_soft): ?>
-              结尾 <code>~all</code>：未授权来源标记为 softfail（较宽松）
-            <?php else: ?>
-              <span class="text-warning">结尾不是 <code>-all</code> / <code>~all</code>，策略不明确</span>
-            <?php endif; ?>
-          </small>
+        <?php if ($c['reason'] !== ''): ?>
+          <div><?=htmlspecialchars($c['reason']);?></div>
         <?php endif; ?>
-      </td>
-    </tr>
-
-    <!-- DKIM -->
-    <tr>
-      <td>DKIM（签名）</td>
-      <td><?php
-        if ($dkim_selector && $dkim_published) { echo DHC_OK; }
-        elseif ($dkim_selector && !$dkim_published) { echo DHC_BAD; }
-        else { echo DHC_WARN; }
-      ?></td>
-      <td>
-        <?php if (!$dkim_selector): ?>
-          <span class="text-warning">本机 redis 中未记录该域的 DKIM selector</span><br>
-          <small>若该域不用于发信，可忽略；用于发信则需在「DKIM 密钥」中生成。</small>
-        <?php else: ?>
-          selector：<code><?=htmlspecialchars($dkim_selector);?></code><br>
-          DNS 记录名：<code><?=htmlspecialchars($dkim_dns_name);?></code><br>
-          <?php if ($dkim_published): ?>
-            公钥已发布<?php if ($dkim_key_bits): ?>，长度约 <strong><?=(int)$dkim_key_bits;?></strong> bit<?php endif; ?>
-            <?php if ($dkim_key_bits && $dkim_key_bits < 1024): ?><span class="text-danger">密钥过短</span><?php endif; ?>
-          <?php else: ?>
-            <strong class="text-danger">DNS 上查不到该 selector 的公钥</strong><br>
-            <small>签名会验不过。请把「DKIM 密钥」页里的 TXT 值发布到 DNS。</small>
-          <?php endif; ?>
-        <?php endif; ?>
-      </td>
-    </tr>
-
-    <!-- DMARC -->
-    <tr>
-      <td>DMARC（策略）</td>
-      <td><?php
-        if ($dmarc === null) { echo DHC_BAD; }
-        elseif ($dmarc_policy === 'reject') { echo DHC_OK; }
-        elseif ($dmarc_policy === 'quarantine') { echo DHC_OK; }
-        else { echo DHC_WARN; }
-      ?></td>
-      <td>
-        <?php if ($dmarc === null): ?>
-          <strong class="text-danger">未找到 DMARC 记录</strong><br>
-          <small>Gmail / Outlook 对无 DMARC 的域名会明显更保守。</small>
-        <?php else: ?>
-          <code><?=htmlspecialchars($dmarc);?></code><br>
-          <small>
-            策略 <code>p=<?=htmlspecialchars((string)$dmarc_policy);?></code>
-            <?php if ($dmarc_policy === 'none'): ?>
-              —— <span class="text-warning">仅监控，不拦截</span>。对投递率提升有限；建议先加 <code>rua</code> 观察，再逐步收紧到 <code>quarantine</code>。
-            <?php endif; ?><br>
-            聚合报告 rua：<?=$dmarc_has_rua ? '已配置' : '<span class="text-warning">未配置（无法收到认证汇总报告）</span>'; ?>
-          </small>
-        <?php endif; ?>
-      </td>
-    </tr>
-
-    <!-- MX -->
-    <tr>
-      <td>MX 记录</td>
-      <td><?php
-        if (empty($mxs)) { echo DHC_BAD; }
-        elseif ($mx_points_here) { echo DHC_OK; }
-        else { echo DHC_WARN; }
-      ?></td>
-      <td>
-        <?php if (empty($mxs)): ?>
-          <span class="text-danger">没有 MX 记录</span>
-        <?php else: ?>
-          <?=htmlspecialchars(implode(', ', $mxs));?><br>
-          <small>
-            服务器主机名 <code><?=htmlspecialchars($hostname);?></code>
-            <?php if ($mx_points_here): ?>—— 一致<?php else: ?>—— <span class="text-warning">MX 未指向本机，请确认这是预期的</span><?php endif; ?>
-          </small>
-        <?php endif; ?>
-      </td>
-    </tr>
-
-    <!-- A 记录（网站可达性） -->
-    <tr>
-      <td>A 记录（网站可达性）</td>
-      <td><?php
-        if (!empty($a_records) || !empty($www_records)) { echo DHC_OK; }
-        else { echo DHC_WARN; }
-      ?></td>
-      <td>
-        <?php if (empty($a_records)): ?>
-          <span class="text-danger">无 A 记录</span>
-        <?php else: ?>
-          根域：<?php foreach ($a_records as $i => $ip): ?><?php if ($i > 0): ?>, <?php endif; ?><code><?=htmlspecialchars($ip);?></code><?php endforeach; ?>
-        <?php endif; ?><br>
-        www：<?php if (empty($www_records)): ?>无<?php else: ?><?php foreach ($www_records as $i => $ip): ?><?php if ($i > 0): ?>, <?php endif; ?><code><?=htmlspecialchars($ip);?></code><?php endforeach; ?><?php endif; ?><br>
-        <small>
-          <?php if (empty($a_records) && empty($www_records)): ?>
-            <span class="text-warning">该域名没有网站。</span>
-            Gmail 等接收方会参考域名是否有真实内容，完全没有网站的域名更容易被当作垃圾发信源；建议为该域名建站，或把 A / CNAME 指向已有网站。
-          <?php else: ?>
-            域名存在可访问的网站内容，对投递信誉有正面作用。
-          <?php endif; ?>
-        </small>
-      </td>
-    </tr>
-
-    <!-- PTR -->
-    <tr>
-      <td>反向解析 PTR</td>
-      <td><?php echo $ptr_matches ? DHC_OK : ($ptr ? DHC_WARN : DHC_UNK); ?></td>
-      <td>
-        <?php if (!$pubip): ?>
-          <span class="text-muted">无法取得本机出口 IP</span>
-        <?php else: ?>
-          出口 IP：<code><?=htmlspecialchars($pubip);?></code><br>
-          PTR：<code><?=htmlspecialchars((string)($ptr ?: '（无）'));?></code><br>
-          <small>
-            <?php if ($ptr_matches): ?>
-              与 <code>MAILCOW_HOSTNAME</code> 一致，符合规范。
-            <?php else: ?>
-              <span class="text-warning">与 <code>MAILCOW_HOSTNAME</code> 不一致</span>。多数接收方要求 PTR 与 HELO 名一致，建议在主机商侧修正。
-            <?php endif; ?>
-          </small>
-        <?php endif; ?>
-      </td>
-    </tr>
-
-    <!-- 黑名单 -->
-    <tr>
-      <td>出口 IP 黑名单</td>
-      <td><?php
-        if (!empty($rbl['listed'])) { echo DHC_BAD; }
-        else { echo DHC_OK; }
-      ?></td>
-      <td>
-        <?php if (empty($rbl['listed'])): ?>
-          在已查询的黑名单中<strong>未发现</strong>该 IP。<br>
-        <?php else: ?>
-          <strong class="text-danger">被发现于以下黑名单：</strong>
-          <ul class="mb-1"><?php foreach ($rbl['listed'] as $l): ?><li><?=htmlspecialchars($l);?></li><?php endforeach; ?></ul>
-        <?php endif; ?>
-        <?php if (!empty($rbl['refused'])): ?>
+        <?php if (!empty($c['evidence'])): ?>
           <small class="text-muted">
-            <i class="bi bi-info-circle"></i>
-            以下列表拒绝了本次查询（未生效，<em>不代表被列入</em>）：<?=htmlspecialchars(implode(', ', $rbl['refused']));?><br>
-            Spamhaus 对公共解析器会返回 127.255.255.x 表示「查询被拒」。如需真实结果，请配置 Spamhaus DQS key。
+            <?php foreach ($c['evidence'] as $e): ?>
+              <div><?=htmlspecialchars($e);?></div>
+            <?php endforeach; ?>
           </small>
         <?php endif; ?>
-      </td>
-    </tr>
-
-    <!-- 域名年龄 -->
-    <tr>
-      <td>域名注册时长</td>
-      <td><?php
-        if ($age_days === null) { echo DHC_UNK; }
-        elseif ($age_days >= 90) { echo DHC_OK; }
-        else { echo DHC_WARN; }
-      ?></td>
-      <td>
-        <?php if ($age_days === null): ?>
-          <span class="text-muted">无法取得注册日期（RDAP 查询失败或该 TLD 不支持）</span>
-        <?php else: ?>
-          约 <strong><?=(int)$age_days;?></strong> 天<br>
-          <?php if ($age_days < 90): ?>
-            <small class="text-warning">
-              <i class="bi bi-exclamation-triangle"></i>
-              新注册域名会被 Gmail 等接收方审慎对待（业界经验：低于 30–90 天投递最不稳定）。
-              这段时间建议：降低发信量、优先用有历史的中继、引导收件人把邮件标记为「非垃圾」。
-            </small>
-          <?php endif; ?>
+        <?php if ($c['fix'] !== ''): ?>
+          <div class="mt-1">
+            <small><span class="badge bg-light text-dark border">建议</span> <?=htmlspecialchars($c['fix']);?></small>
+          </div>
         <?php endif; ?>
       </td>
     </tr>
-
-    <!-- rspamd 实际打分 -->
-    <tr>
-      <td>本机出站打分（rspamd）</td>
-      <td><?php
-        if (empty($scores)) { echo DHC_UNK; }
-        else {
-          $max = 0; foreach ($scores as $s) { $max = max($max, $s['score']); }
-          echo $max >= 6 ? DHC_BAD : ($max >= 3 ? DHC_WARN : DHC_OK);
-        }
-      ?></td>
-      <td>
-        <?php if (empty($scores)): ?>
-          <span class="text-muted">近期没有该域的出站记录（先发一封再回来查看）</span>
-        <?php else: ?>
-          <?php foreach ($scores as $s): ?>
-            <div>
-              分数 <strong><?=htmlspecialchars(number_format($s['score'], 2));?></strong>
-              （阈值 15.00）<?php if ($s['action'] !== ''): ?>，动作 <code><?=htmlspecialchars($s['action']);?></code><?php endif; ?>
-              <?php if (!empty($s['time'])): ?><small class="text-muted"> · <?=htmlspecialchars(date('Y-m-d H:i', $s['time']));?></small><?php endif; ?>
-              <?php
-                // 只展示对出站投递有意义的加分项
-                $hits = array();
-                foreach ((array)$s['symbols'] as $sym => $info) {
-                  $sc = is_array($info) ? (float)($info['score'] ?? 0) : (float)$info;
-                  if ($sc > 0) { $hits[] = htmlspecialchars($sym) . '(' . number_format($sc, 2) . ')'; }
-                }
-                if ($hits): ?><br><small><?=implode(' ', $hits);?></small><?php endif; ?>
-            </div>
-          <?php endforeach; ?>
-        <?php endif; ?>
-      </td>
-    </tr>
+    <?php endforeach; ?>
     </tbody>
   </table>
 </div>
@@ -604,7 +596,8 @@ $www_records   = dhc_a('www.' . $domain);
 <p class="help-block">
   <small>
     <i class="bi bi-info-circle"></i>
-    本页为只读诊断，不会修改任何配置。DNS 结果受解析器缓存影响，刚做的改动可能需等待 TTL 到期才会反映。<br>
+    本页为只读诊断，不会修改任何配置。DNS 结果受解析器缓存影响，刚做的改动可能需等待 TTL 到期才会反映。
+    黑名单结果缓存 1 小时。<br>
     说明：SPF / DKIM / DMARC 全部通过，并不保证邮件进入收件箱——接收方还会综合评估出口 IP 信誉、域名历史、域名是否有网站内容，以及收件人互动。
     若三项全部通过但仍进垃圾箱，请优先检查「A 记录（网站可达性）」「出口 IP 黑名单」「域名注册时长」与「本机出站打分」四项。
   </small>

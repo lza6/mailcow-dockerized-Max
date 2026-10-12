@@ -527,12 +527,12 @@ jQuery(function($){
               item.action += '<a href="/edit/domain/' + encodeURIComponent(item.domain_name) + '" class="btn btn-sm btn-xs-lg btn-xs-half btn-secondary"><i class="bi bi-pencil-fill"></i> ' + lang.edit + '</a>' +
                 '<a href="#" data-action="delete_selected" data-id="single-domain" data-api-url="delete/domain" data-item="' + encodeURIComponent(item.domain_name) + '" class="btn btn-sm btn-xs-lg btn-xs-half btn-danger"><i class="bi bi-trash"></i> ' + lang.remove + '</a>' +
                   '<a href="#dnsInfoModal" class="btn btn-sm btn-xs-lg btn-info" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-globe2"></i> DNS</a>' +
-                  '<a href="#domainHealthModal" class="btn btn-sm btn-xs-lg btn-warning" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-heart-pulse"></i> 域名健康</a></div>';
+                  '<a href="#domainHealthModal" class="btn btn-sm btn-xs-lg btn-warning" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-heart-pulse"></i> ' + lang.domain_health + '</a></div>';
             }
             else {
               item.action += '<a href="/edit/domain/' + encodeURIComponent(item.domain_name) + '" class="btn btn-sm btn-xs-lg btn-xs-half btn-secondary"><i class="bi bi-pencil-fill"></i> ' + lang.edit + '</a>' +
               '<a href="#dnsInfoModal" class="btn btn-sm btn-xs-lg btn-xs-half btn-info" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-globe2"></i> DNS</a>' +
-              '<a href="#domainHealthModal" class="btn btn-sm btn-xs-lg btn-xs-half btn-warning" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-heart-pulse"></i> 域名健康</a></div>';
+              '<a href="#domainHealthModal" class="btn btn-sm btn-xs-lg btn-xs-half btn-warning" data-bs-toggle="modal" data-domain="' + encodeURIComponent(item.domain_name) + '"><i class="bi bi-heart-pulse"></i> ' + lang.domain_health + '</a></div>';
             }
 
             if (Array.isArray(item.tags)){
