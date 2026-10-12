@@ -38,14 +38,42 @@ if ($is_api_session && $is_write) {
 }
 
 // ---- 写操作需要 CSRF ----
-// 注意：键名必须是 $_SESSION['CSRF']['TOKEN']（权威定义见 inc/footer.inc.php:77
+// 键名必须是 $_SESSION['CSRF']['TOKEN']（权威定义见 inc/footer.inc.php:77
 // 与 inc/sessions.inc.php:33-34）。此前误用 csrf_token 导致校验恒失败。
-// 另外，mailcow 的 session_check()（sessions.inc.php:157-168）在浏览器会话下
-// 已校验并 unset($_POST['csrf_token']) 并轮换 token，因此这里只对
-// 「未被框架校验过的路径」补校验 —— 即 API 会话。
+//
+// 浏览器会话：mailcow 的 session_check()（sessions.inc.php:157-168）已校验过，
+//   并在**通过后 unset($_POST['csrf_token']) 且轮换 token**，所以不能再去比对
+//   token 值（必然不等 → 合法请求全 403）。正确判据是「$_POST 是否被清空」：
+//   框架只在**校验失败**时清空它。
+// API 会话：session_check() 走的是另一条分支，未做本端点的 CSRF 校验，因此这里补 hash_equals。
+//
+// ⚠️ 光有上面两条还不够：本文件原先用 $_REQUEST 取 action，于是
+//   `GET /inc/ajax/resend_pool.php?action=set_cf_token` 这样的请求
+//   **不带任何 POST 参数**也能触发写动作 —— 诱导已登录管理员打开一个链接，
+//   就能清掉 Cloudflare Token / 改上限 / 触发全量 auto_assign。
+//   因此写动作一律必须先满足「POST + 带 csrf_token 字段 + $_POST 未被清空」。
+if ($is_write) {
+  if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'POST') {
+    http_response_code(405);
+    echo json_encode(array('ok' => false, 'message' => '该动作仅接受 POST'), JSON_UNESCAPED_UNICODE);
+    exit;
+  }
+  if (!isset($_REQUEST['csrf_token']) || (string)$_REQUEST['csrf_token'] === '') {
+    http_response_code(403);
+    echo json_encode(array('ok' => false, 'message' => '缺少 CSRF token，请刷新页面后重试'), JSON_UNESCAPED_UNICODE);
+    exit;
+  }
+  if (empty($_POST)) {
+    http_response_code(403);
+    echo json_encode(array('ok' => false, 'message' => 'CSRF 校验失败，请刷新页面后重试'), JSON_UNESCAPED_UNICODE);
+    exit;
+  }
+}
+
+// API 会话额外比对 token 值（浏览器会话的 token 已被框架轮换，不能比）
 if ($is_write && $is_api_session) {
   $sess_token = $_SESSION['CSRF']['TOKEN'] ?? '';
-  if (!isset($_POST['csrf_token']) || !hash_equals($sess_token, (string)$_POST['csrf_token'])) {
+  if (!hash_equals($sess_token, (string)$_POST['csrf_token'])) {
     http_response_code(403);
     echo json_encode(array('ok' => false, 'message' => 'CSRF token invalid'), JSON_UNESCAPED_UNICODE);
     exit;

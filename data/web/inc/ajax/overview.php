@@ -343,12 +343,16 @@ try {
       // 用一个 20 秒的 redis 锁把重复触发折叠掉。
       if ($redis) {
         try {
-          if (!$redis->setnx('OV_CHECKALL_LOCK', '1')) {
+          // 必须用**单条** SET NX EX，不能 setnx + expire 两步：
+          // 两步之间只要进程被杀（超时、OOM、部署重启），就会留下一个**没有 TTL 的锁**，
+          // 此后每次点「一键体检」都回「请 1 秒后再试」，而且**永远不会自愈**
+          // （setnx 一直失败、expire 永远轮不到）。原子写法没有这个窗口。
+          $got = $redis->set('OV_CHECKALL_LOCK', '1', array('nx', 'ex' => 20));
+          if (!$got) {
             $ttl = (int)$redis->ttl('OV_CHECKALL_LOCK');
             ov_json(array('ok' => false,
                           'message' => '体检刚刚执行过，请 ' . max(1, $ttl) . ' 秒后再试'));
           }
-          $redis->expire('OV_CHECKALL_LOCK', 20);
         } catch (Exception $e) {
           // redis 异常不阻断体检本身
         }

@@ -4,11 +4,27 @@ function init_db_schema()
   try {
     global $pdo;
 
-    // ⚠️ 新增/修改表定义后**必须**改这个版本号：
-  //    init_db_schema() 在 `versions.db_schema` 与本值相等时**直接 return**，
-  //    不会执行下面的表结构差异 —— 忘了改的话新表永远不会被建出来，
-  //    而且不报错（业务侧只会静默写不进数据）。
-  //    $db_version = "14102026_0100";
+    /*
+     * ⚠️ 新增/修改表定义后**必须**把下面的日期往后改一位（如 _0100 → _0200）：
+     *    init_db_schema() 在 `versions.db_schema` 与本值相等时**直接 return**，
+     *    不会执行下面的表结构差异 —— 忘了改的话新表永远不会被建出来，
+     *    而且不报错（业务侧只会静默写不进数据，实测踩过 warmup_messages）。
+     *
+     * ⚠️ 这一行**必须是活代码，不能注释掉**：
+     *    - 本值在下面的门控比较里参与判断，并在函数末尾写回 `versions` 表；
+     *      没有赋值时它为 null，比较恒不相等 → 门控永远不生效、版本号写不进去。
+     *    - data/Dockerfiles/sogo/bootstrap-sogo.sh 会从这个文件里 grep 出本行取值，
+     *      注释行一样会被 grep 到，于是取到一个永远不会被写进库的值 → sogo 死循环等 schema。
+     *    - 另外：**不要**在这段注释里原样写出那一行的正则形式，否则会把 grep 带偏
+     *      （本条就是踩过之后补的教训）。
+     *
+     * 2026-10-12：本项目相对上游新增了 10 张表（resend_accounts / resend_domains /
+     * warmup_plans / warmup_recipients / warmup_messages / warmup_log /
+     * resend_pool_settings / admin_audit_log / overview_mbox_daily / mailbox_mailstats），
+     * 而库里 db_schema 一直是上游的 10102026_2200、warmup_messages 从未被建出来。
+     * 因此这里恢复赋值并提升到 12102026_0100。
+     */
+    $db_version = "12102026_0100";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));

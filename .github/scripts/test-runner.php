@@ -118,6 +118,57 @@ if (file_exists($healthFile)) {
 }
 
 /* ------------------------------------------------------------------ *
+ * 5. DB 版本门控：$db_version 必须是「活的」单次赋值
+ *
+ * 为什么值得单独守一道：
+ *   init_db_schema() 是版本门控的 —— `versions.db_schema` 与 `$db_version`
+ *   相等就直接 return，不跑表结构差异。而 sogo 的 bootstrap-sogo.sh 会用
+ *   `grep -oE '$db_version = .*;'` 从这个文件里把它 grep 出来做等待判据。
+ *
+ *   2026-10-11 的 b118644d5 声称「提升 $db_version」，实际把赋值行改成了**注释**：
+ *     · PHP 侧 $db_version 变成 null → 门控恒不生效、版本号写不进库
+ *     · sogo 侧 grep 到的是注释里的值 → 与库里的值永远不等 → **死循环等 schema**
+ *   结果是项目新增的 10 张表（含 warmup_messages）在库里一直不存在，且不报错。
+ *
+ *   这一节就是防它复发：赋值必须存在、必须是活代码、必须只出现一次。
+ * ------------------------------------------------------------------ */
+section('DB 版本门控');
+
+$initDb = $ROOT . '/data/web/inc/init_db.inc.php';
+assert_true(file_exists($initDb), 'init_db.inc.php 存在');
+
+if (file_exists($initDb)) {
+    $src = file_get_contents($initDb);
+
+    // 行首非注释的赋值语句才算「活代码」
+    $liveHits = array();
+    foreach (preg_split('/\r?\n/', $src) as $line) {
+        if (preg_match('/^\s*\$db_version\s*=\s*"[^"]+"\s*;/', $line)) {
+            $liveHits[] = trim($line);
+        }
+    }
+    assert_true(count($liveHits) === 1, '$db_version 恰好有一处未被注释的赋值（实际 ' . count($liveHits) . ' 处）');
+
+    // grep 得到的赋值必须唯一，否则 sogo 的等待判据会取到多个值
+    $grepLike = preg_match_all('/\$db_version\s*=\s*"[^"]*"\s*;/', $src);
+    assert_true($grepLike === 1, '`\$db_version = "…";` 在全文件只出现一次，sogo 的 grep 不会取到歧义值（实际 ' . $grepLike . ' 处）');
+
+    // 赋值必须出现在门控比较之前，否则比较时它还是 null
+    $assignAt = strpos($src, '$db_version = ');
+    $compareAt = strpos($src, '== $db_version');
+    assert_true($assignAt !== false && $compareAt !== false && $assignAt < $compareAt,
+        '$db_version 的赋值出现在门控比较之前');
+
+    // 值必须是形如 yyyymmdd_hhmm 的版本串
+    if (!empty($liveHits)) {
+        assert_true(
+            (bool)preg_match('/\$db_version\s*=\s*"\d{8}_\d{4}"/', $liveHits[0]),
+            '$db_version 是 yyyymmdd_hhmm 形式的版本串（实际 ' . $liveHits[0] . '）'
+        );
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * 汇总
  * ------------------------------------------------------------------ */
 echo "\n" . str_repeat('-', 50) . "\n";

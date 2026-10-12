@@ -374,7 +374,13 @@ function resend_pool_assign($domain, $account_id) {
  * 需要 redis 中存在 CF_TOKEN2 与 zone 映射；未配置时跳过（不报错）
  */
 function resend_pool_write_dns($domain, $records) {
-  global $redis;
+  // ⚠️ 必须同时声明 $pdo。这里的 $pdo 要传给 resend_pool_cf_token()，
+  // 而后者会用它调 resend_pool_setting_get($pdo, ...)。
+  // 漏掉这行时 $pdo 在函数作用域内是 undefined → null → `null->prepare()` 抛的是
+  // **Error**（PHP 8 里不是 Exception），沿途各层的 catch (Exception) 全都接不住，
+  // 最终逃到 ajax 顶层变成 HTTP 500 —— 症状是点「绑定域名」直接报服务器内部错误，
+  // 且因为崩在第②步，Resend 侧域名已创建、本地却什么都没落库（留下脏状态）。
+  global $pdo, $redis;
   $cf_token = resend_pool_cf_token($pdo, $redis);
   if (!$cf_token || empty($records)) {
     return array('written' => 0, 'skipped' => true, 'reason' => '未配置 Cloudflare Token 或无记录');
