@@ -208,6 +208,18 @@ services:
         ofelia.job-exec.phpfpm_warmup.schedule: "0 */5 * * * *"
         ofelia.job-exec.phpfpm_warmup.no-overlap: "true"
         ofelia.job-exec.phpfpm_warmup.command: "/bin/bash -c \"php /crons/warmup.php || exit 0\""
+        # 每 30 分钟做一次域名体检（MX/SPF/DKIM/DMARC + 域龄），写 redis 缓存。
+        # 总览页那两列读的是 OV_CHECK/<域>，TTL 只有 1 小时 —— 没有这个任务时，
+        # 管理员每次打开页面看到的几乎都是「未检测」（缓存早过期了）。
+        ofelia.job-exec.phpfpm_healthcheck.schedule: "0 */30 * * * *"
+        ofelia.job-exec.phpfpm_healthcheck.no-overlap: "true"
+        ofelia.job-exec.phpfpm_healthcheck.command: "/bin/bash -c \"php /crons/healthcheck.php || exit 0\""
+        # 每 30 分钟维护号池：对 Resend 侧仍 pending 的域**重新触发验证**
+        # （绑定时的首次验证常常跑在 DNS 生效之前，于是永远停在 pending），
+        # 同步域状态与快照，并校验各账号 API Key 是否仍有效。
+        ofelia.job-exec.phpfpm_pool_sync.schedule: "0 5,35 * * * *"
+        ofelia.job-exec.phpfpm_pool_sync.no-overlap: "true"
+        ofelia.job-exec.phpfpm_pool_sync.command: "/bin/bash -c \"php /crons/pool_sync.php || exit 0\""
         # 每天 04:30 清理自建表的过期数据（audit 180 天 / warmup_log 365 天 /
         # overview_mbox_daily 90 天）。这三张表只增不减且都参与总览查询，
         # 不清理会让页面随时间变慢。
