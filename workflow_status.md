@@ -56,7 +56,7 @@
 | R21 | 养号：没绑 Resend 的域也要能养 | `ajax/warmup.php add_plans_for_all` | done | 一键为全部未养号邮箱建计划 | — |
 | R22 | Google 应用密码获取方法（文档+UI） | UI 弹窗 + Release 说明 | done | 界面「怎么获取应用专用密码？」含 6 步 + 3 个前提 | 可补 `docs/` 独立文档 |
 | R23 | **每个按钮都要真实有逻辑** | — | done | 审计脚本：47 个控件全部有处理器；修复了 1 个假按钮 `ov_pool_reveal` | 建议把审计脚本纳入 CI |
-| R24 | 域名信誉显示 + 数据来源标注 | 部分：SPF/DKIM/DMARC/MX + RDAP 域龄 | partial | 体检已有；来源是 `dns_get_record` + RDAP | **Google Postmaster 信誉分未接入**（需用户 OAuth 授权） |
+| R24 | 域名信誉显示 + 数据来源标注 | 部分：SPF/DKIM/DMARC/MX + RDAP 域龄 | partial | 体检已有；来源是 `dns_get_record` + RDAP | **Google Postmaster 官方信誉已接入**（见 R28）；体检弹窗仍用它自己的来源 |
 | R25 | 高并发/压测 | — | partial | 只读 1950 请求 0 失败；并发写 600 次 0 死锁 | 发现 `pm.max_children=50` 打满；更高并发需调大 |
 | R26 | 用户提出的「密码可复制」 | — | blocked | 同 R11 | 只能：重置后显示一次 / 为养号收件人凭据保存（R12） |
 | R27 | 域名健康入口/弹窗**零硬编码中文** | `js/site/mailbox.js`、`templates/modals/mailbox.twig`、3 份语言包 | done | 中文字符扫描 0 处；**真实 Twig 渲染 × 3 语言 26 断言** | — |
@@ -73,6 +73,12 @@
 | R38 | 号池扩容到 5 账号 / 13 域 | `resend_accounts` / `resend_domains` / `relayhosts` | **done** | **生产实测**：5 账号 active、13 域入库、每账号一条 `resend#N` 中继；UI 端点 `mode=status` 复读一致 | `summitnestretail.com` / `trendhollowretail.com` 受 Resend 套餐上限未绑 |
 | R39 | 生产 `$db_version` 修复 | `init_db.inc.php`（生产热更新） | **done** | **生产实测**：修复前库里 `db_schema` 为**空值**、修复后为 `12102026_0100`；备份在 `/tmp/init_db.inc.php.bak_*` | — |
 | R40 | 生产 `resend_pool_write_dns` 的 `$pdo` 修复 | `functions.resend_pool.inc.php`（生产热更新） | **done** | **生产实测**：修复前 md5 `7ae558c…`（`global $redis;`），修复后 `97699c7…`（`global $pdo, $redis;`）；随后 12 域分配成功 10 个（另 2 个是套餐上限） | — |
+| R41 | **Google Postmaster Tools 接入**（官方域信誉/投诉率/认证通过率/投递错误） | `inc/postmaster_lib.inc.php`、`inc/functions.postmaster.inc.php`、`inc/ajax/postmaster.php`、`js/site/postmaster.js`、`templates/admin/tab-config-postmaster.twig`、`crons/postmaster_sync.php`、`init_db`(新表) | **done（本地）** | 4 套离线测试 183 断言 + 端点真实 E2E 21 断言全过（见 §三）；线上部署待 SSH 凭据 | **线上未部署**；另需在 Cloud Console 启用 2 个 API 并配 OAuth 客户端 |
+| R42 | 投递错误按**单日日均**口径展示（旧实现逐日累加会显示成 350%） | `postmaster_lib.inc.php` + `postmaster.js` | **done** | 纯逻辑 106 断言含「7 天各 0.5% → 仍是 0.5%，且 ratio ≤ 1」回归守卫；jsdom 断言拒绝出现 `350.00%`/`NaN` | — |
+| R43 | 复核失败区分「再等等」与「再等也没用」 | `pm_verify_error_is_fatal()` | **done** | 11 条断言：403/401/404/`forbidden`/`already verified` → fatal；token mismatch/超时/429/500 → 继续等 | — |
+| R44 | 凭据保管箱离线可测 | `.github/scripts/test-secretbox.php` | **done** | 18 断言：密文不含明文、两次加密不同（随机 IV）、GCM 篡改必失败、密钥 0600 且不在 Web 根下 | 已进 CI |
+| R45 | 前端渲染层有真实 DOM 测试（PHP 测不到） | `.github/scripts/test-js-postmaster.mjs` + `js-harness/` | **done** | jsdom 28 断言：读回真实 DOM 文本；空 tbody 被删后能重建；Bootstrap 缺席时提示不崩 | 已进 CI（缺依赖时 exit 2，不静默通过） |
+| R46 | `catch (Exception)` 接不住 PHP 8 `Error` | `functions.resend_pool.inc.php` 4 处 | **done** | 全文已改为 `Throwable`；该文件自己的注释里就记着这个教训却仍有 4 处漏改 | — |
 
 ---
 
@@ -82,7 +88,7 @@
 |---|---|
 | 显示邮箱**登录密码**明文 | mailcow 用 bcrypt 单向哈希，数学上不可逆。任何系统都做不到，除非改存储方式（会削弱安全） |
 | 知道邮件进了 Gmail 的哪个文件夹 | 必须能登录**收件人**账号 → 需要该账号的应用专用密码 |
-| Google Postmaster 域/IP 信誉分 | 需要用户本人用 Google 账号做 OAuth 授权 |
+| Google Postmaster **数据**本身 | 需要用户本人用 Google 账号授权或在该账号下加域名。程序已实现（OAuth + 免授权手工两条路径），属于**待用户输入**而非能力缺失 |
 | Mailtrap 实发 | 卡在账号 `missing_company_info` 合规，需用户填公司信息 |
 | serv00 邮件数据迁移 | 需要 serv00 凭据（已下线，但历史邮件在那边） |
 
@@ -92,6 +98,11 @@
 
 | 验证项 | 最后执行 | 结论 | 何时需要重跑 |
 |---|---|---|---|
+| **Postmaster 纯逻辑** | 2026-07b-cn.15 | **106/106**（`php .github/scripts/test-postmaster.php`） | 改 `postmaster_lib.inc.php` 后 |
+| **Postmaster 渲染/契约** | 2026-07b-cn.15 | **31/31**（`php .github/scripts/test-render-postmaster.php`） | 改 `tab-config-postmaster.twig` 或 `postmaster.js` 后 |
+| **Postmaster 真实 DOM（jsdom）** | 2026-07b-cn.15 | **28/28**（`node .github/scripts/test-js-postmaster.mjs`；先 `npm ci --prefix .github/scripts/js-harness`） | 改 `postmaster.js` 后 |
+| **凭据保管箱（离线）** | 2026-07b-cn.15 | **18/18**（`php .github/scripts/test-secretbox.php`） | 改 `functions.secretbox.inc.php` 后 |
+| **Postmaster 端点 E2E** | 2026-07b-cn.15 | **21/21** 本地栈真实链路：登录→概要 200 / 无会话 403 / 无 CSRF 403 / 写操作 GET 405 / 未知 action 400 / 未连 Google 业务级拒绝 / Secret 只以密文落库（键 `pm_oauth_client_secret_enc`）/ 全程零 PHP 错误 | 改端点、CSRF 门或 OAuth 存储后 |
 | 页面渲染（jsdom 真实 DOM） | 2026-10-11 | 域 16 行 / 邮箱 16 行 / 池 1 / 绑 3 / 计划 1 / 收件人 1 / 汇总 2 / 审计 30 | 改 `overview.twig` / `overview.js` / `functions.overview.inc.php` 后 |
 | 空 tbody 检查 | 2026-10-11 | 83 个模板全部通过 | 改任何 `.twig` 后 |
 | 按钮处理器审计 | 2026-10-11 | 47 控件全部有处理器 | 改 `overview.twig` / `overview.js` 后 |
@@ -128,11 +139,18 @@
 4. R9 邮箱「最近一封邮件时间 / 今日邮件数」——需要新的数据来源（`quota2` 无此字段）
 5. R10 邮箱级中继覆盖
 6. 把「按钮审计」「空 tbody 检查」纳入 CI
-7. Google Postmaster 接入（blocked: 需 OAuth）
+7. **R41 Google Postmaster：线上部署尚未执行**（SSH 凭据 `/tmp/ap.sh` 不在本机）。
+   部署后仍需两步人工操作才能出数据：
+   （a）Cloud Console 启用 `Gmail Postmaster Tools API` + `Site Verification API`；
+   （b）配置 OAuth 客户端并在界面连接（或走免授权手工粘贴路径）。
+   另：确认 `data/conf/warmup` 属主为 `82:82`（www-data），否则凭据保存会失败 —— 见 SOP §3.4
 
 ### P3
 8. 保留期清理任务已上线（audit 180d / warmup_log 365d / overview_mbox_daily 90d），观察一段时间
 9. `docs/` 补一份《Google 应用专用密码获取》独立文档
+10. 繁体 `zh-tw` 语言包有两处断言未过（`test-render-domain-health.php`、
+    `test-lang-fallback.php` 比对具体文案）。**与本轮改动无关**（`git diff` 确认 lang/ 与这两个测试文件均未改动），
+    属既有欠账：key 不缺（缺失数为 0），是译文用词与测试期望的措辞不一致
 
 ---
 
@@ -146,6 +164,11 @@
 | CSRF 语义反直觉：通过后 unset 字段并轮换，失败才清空 `$_POST` | 直接比对 token → **所有合法写请求 403** | 判据用「`$_POST` 是否被清空」；无参副作用动作必须显式校验 |
 | `init_db_schema()` 是**版本门控**的 | 在 `$tables` 里加了新表但没改 `$db_version` → **表永远建不出来，且不报错**（业务侧静默写不进数据），实测踩过 `warmup_messages` | 新增/改表定义后**必须**提升 `$db_version`；部署后用 `SHOW TABLES LIKE` 逐个复核 |
 | 远端 `main` 与本地 `master` **无共同祖先** | 直接 push 被拒；force push 会丢历史与 tag | `fetch max/main` → cherry-pick → 快进推送 |
+| `/warmup-secrets` 属主不是 www-data(82) | 所有「保存敏感凭据」失败（Postmaster Client Secret、养号 IMAP 密码）。CLI(root) 能跑通、HTTP 不能 —— 这是权限问题的指纹 | 部署后 `chown -R 82:82 data/conf/warmup && chmod 700`；见 SOP §3.4 |
+| 逐日累加**比例型**指标 | 7 天 × 0.5% 相加 → 界面显示「350%」，物理上不可能的数值 | 比例按"有数据的天"求平均；另给 `days`/`max` 区分偶发尖峰与持续问题 |
+| 只 `catch (Exception)` | PHP 8 里 `null->method()` / 未定义变量抛的是 **`Error`**，接不住 → 逃成 HTTP 500 | 统一 `catch (Throwable)`；`functions.resend_pool.inc.php` 曾因此崩在流程中间留下脏状态 |
+| Cloudflare 写 CNAME 不给 `proxied` | 开了橙云的 zone 会默认代理，目标被 CF 藏住 → 第三方校验（Google 域名所有权）**永远验不过** | 验证/签发类记录显式 `proxied: false` |
+| php-fpm 关了 `display_errors` | `require_once` 失败 → **空体 200**，控制台一声不响 | 容器内 `php -d display_errors=1` 直接 include 该端点定位；本地栈用 `_local/sync-web.sh` 同步防缺文件 |
 
 ---
 
@@ -159,6 +182,8 @@
 | `docker-compose.yml`（ofelia 标签 / 新挂载） | `docker compose up -d --force-recreate --no-deps php-fpm-mailcow`，**随后必须重启 nginx**（它缓存上游 IP） |
 | `data/conf/phpfpm/crons/*.php` | 只重启 php-fpm（目录已挂载） |
 | `init_db.inc.php` 新增表 | 无需操作（下次请求自动建）；**改已有表的列必须手工 ALTER** |
+| `init_db.inc.php` 新增表 **或改列** | **必须先重启 php-fpm 再让它跑**：旧字节码会拿旧表定义做对账，把刚加的列**删掉**并把版本号写回旧值 |
+| `data/conf/warmup/`（凭据保管箱密钥目录） | 目录属主须为 `82:82`（www-data）且 0700，否则所有「保存敏感凭据」失败（**明确报错，不静默丢数据**） |
 | `data/Dockerfiles/**`（如 `postfix/postfix.sh`） | **必须重建镜像**：先给该服务加 `build:`（见下），再 `docker compose build <svc> && docker compose up -d --force-recreate --no-deps <svc>`。**`restart` 和挂载都不会生效** |
 
 ### ⚠️ `data/Dockerfiles/**` 的改动默认**根本不生效**
