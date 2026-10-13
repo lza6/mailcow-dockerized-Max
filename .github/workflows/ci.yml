@@ -128,6 +128,29 @@ jobs:
       - name: 养号 IMAP 文件夹名解码测试（离线）
         run: php .github/scripts/test-warmup-folder.php
 
+      - name: Google Postmaster 纯逻辑测试（离线：DNS 记录拆分 / 阈值 / 汇总）
+        run: php .github/scripts/test-postmaster.php
+
+      # 凭据保管箱：密文落库、随机 IV、GCM 篡改检测、密钥 0600。
+      # 这几条是"敏感凭据可逆保存"与"登录密码单向哈希"两类设计的分界线，
+      # 退化了不会报错、只会静默泄露，所以必须有独立测试钉住。
+      - name: 凭据保管箱加解密与安全属性测试（离线）
+        run: php .github/scripts/test-secretbox.php
+
+      - name: Google Postmaster 标签页渲染 + 模板↔JS 契约测试
+        run: php .github/scripts/test-render-postmaster.php
+
+      # 这一层是前两层的空档：PHP 测试只证明"数算对了"，
+      # 渲染契约测试只证明"id 对上了"，都没证明"界面上显示成对的字"。
+      # 用真实 jsdom + jQuery 把页面跑起来、喂数据、读回 DOM 文本。
+      - name: 安装前端测试依赖（jsdom / jquery）
+        run: npm ci --prefix .github/scripts/js-harness || npm install --prefix .github/scripts/js-harness
+
+      - name: Google Postmaster 后台脚本 DOM 行为测试（jsdom 真实渲染）
+        run: node .github/scripts/test-js-postmaster.mjs
+        env:
+          NODE_PATH: ${{ github.workspace }}/.github/scripts/js-harness/node_modules
+
       - name: 语言包回退逻辑测试
         run: php .github/scripts/test-lang-fallback.php
 

@@ -214,12 +214,19 @@ services:
         ofelia.job-exec.phpfpm_healthcheck.schedule: "0 */30 * * * *"
         ofelia.job-exec.phpfpm_healthcheck.no-overlap: "true"
         ofelia.job-exec.phpfpm_healthcheck.command: "/bin/bash -c \"php /crons/healthcheck.php || exit 0\""
-        # 每 30 分钟维护号池：对 Resend 侧仍 pending 的域**重新触发验证**
-        # （绑定时的首次验证常常跑在 DNS 生效之前，于是永远停在 pending），
-        # 同步域状态与快照，并校验各账号 API Key 是否仍有效。
+        # 每 30 分钟维护号池：**先**同步 Resend 侧的域状态，**再**对仍未通过的域
+        # 补一次重触发。（顺序不能反：POST verify 会把上游状态打回 pending，
+        # 先触发后查询就会"读到刚被打回的 pending"并写回本地，永远空转。）
         ofelia.job-exec.phpfpm_pool_sync.schedule: "0 5,35 * * * *"
         ofelia.job-exec.phpfpm_pool_sync.no-overlap: "true"
         ofelia.job-exec.phpfpm_pool_sync.command: "/bin/bash -c \"php /crons/pool_sync.php || exit 0\""
+        # 每 6 小时同步 Google Postmaster：拉域/IP 信誉、用户投诉率、投递错误，
+        # 并代用户请 Google 复核「DNS 已写入但未通过」的域。
+        # 6 小时是刻意的：Postmaster 的数据粒度本来就是"天"且官方说明有 1~2 天延迟，
+        # 拉得更勤拿不到更新的数，只会白耗接口配额。
+        ofelia.job-exec.phpfpm_postmaster_sync.schedule: "0 12 0,6,12,18 * * *"
+        ofelia.job-exec.phpfpm_postmaster_sync.no-overlap: "true"
+        ofelia.job-exec.phpfpm_postmaster_sync.command: "/bin/bash -c \"php /crons/postmaster_sync.php || exit 0\""
         # 每天 04:30 清理自建表的过期数据（audit 180 天 / warmup_log 365 天 /
         # overview_mbox_daily 90 天）。这三张表只增不减且都参与总览查询，
         # 不清理会让页面随时间变慢。

@@ -1,0 +1,260 @@
+{#
+  ⚠️ tbody 不能留空：mailcow 的 footer.js 有一条全局规则
+      $('tbody').filter(function(){ return $(this).children().length < 1; }).remove();
+  它在解析阶段就把所有空 tbody 删掉，导致 JS 再也填不进内容（表格永远空白）。
+  这里放占位行让 tbody 非空，JS 渲染时会整体替换掉。
+#}
+<div class="tab-pane fade" id="tab-config-postmaster" role="tabpanel" aria-labelledby="tab-config-postmaster">
+  <div class="card mb-4">
+    <div class="card-header d-flex fs-5">
+      <button class="btn d-md-none flex-grow-1 text-start" data-bs-target="#collapse-tab-postmaster" data-bs-toggle="collapse" aria-controls="collapse-tab-postmaster">
+        Google Postmaster
+      </button>
+      <span class="d-none d-md-block">Google Postmaster Tools（Gmail 官方信誉）</span>
+    </div>
+    <div id="collapse-tab-postmaster" class="card-body collapse show" data-bs-parent="#admin-content">
+
+      <div class="alert alert-warning">
+        <b>这是干什么的</b>：Gmail 官方会为每个发件域打分（域信誉 / IP 信誉 / 用户投诉率）。
+        <b>这是唯一能看到 Google 内部判定的渠道</b> —— 没有它，判断"会不会进垃圾箱"只能靠猜。
+        <br><b>为什么必须做</b>：实测过「SPF / DKIM / DMARC 三项全 pass，邮件仍然全进垃圾箱」。
+        认证通过只是及格线，真正决定落点的是信誉，而信誉只有这里能看到。
+        <br><b>代价</b>：Google 要你先证明域名是你的（加一条 DNS 记录）。
+        本模块把这件事自动化了 —— 记录由系统算好并写入 Cloudflare，你只需在 Google 点一下「验证」。
+        <br><b>⚠️ 数据要等</b>：Postmaster 只对达到一定发送量的发信方出数据。
+        量级不够时看到「暂无数据」是<b>正常现象</b>，不代表配置错了。
+      </div>
+
+      <!-- 操作反馈的落点（JS 往这里插 alert） -->
+      <div id="pm_notice"></div>
+
+      <!-- ============ 第一步：连接 Google 账号 ============ -->
+      <div class="card mb-3" id="pm_oauth_card">
+        <div class="card-header d-flex align-items-center gap-2">
+          <b>第一步 · 连接 Google 账号</b>
+          <span class="badge bg-secondary ms-1" id="pm_conn_badge">检查中…</span>
+          <span class="text-muted small ms-2" id="pm_conn_email"></span>
+        </div>
+        <div class="card-body">
+
+          <div id="pm_oauth_off">
+            <p class="mb-2">
+              <b>不连接也能用</b>（见第三步的「手工粘贴记录」）。连接后可以自动化三件事：
+              自动取验证记录、自动提交验证、自动拉取信誉数据。
+            </p>
+            <details class="mb-3">
+              <summary class="text-primary" style="cursor:pointer">
+                怎么拿到 Client ID / Secret（点开看，约 5 分钟，只需做一次）
+              </summary>
+              <ol class="mt-2 small">
+                <li>打开 <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a>，新建或选择一个项目。</li>
+                <li>左侧「<b>API 和服务 → 库</b>」，分别搜索并<b>启用</b>这两个 API：
+                  <code>Gmail Postmaster Tools API</code> 与 <code>Site Verification API</code>。
+                  <br><span class="text-muted">少启用任何一个，后面都会报 403 且提示含糊。</span>
+                </li>
+                <li>左侧「<b>API 和服务 → OAuth 同意屏幕</b>」：用户类型选<b>外部</b>，填应用名与你的邮箱，
+                  保存。（个人账号无需提交审核，自己用不受限。）</li>
+                <li>左侧「<b>凭据 → 创建凭据 → OAuth 客户端 ID</b>」，应用类型选<b>Web 应用</b>。</li>
+                <li>在「<b>已授权的重定向 URI</b>」里<b>原样粘贴</b>下面这一条（一字不能差，否则 Google 会回
+                  <code>redirect_uri_mismatch</code>）：
+                  <div class="input-group input-group-sm mt-1" style="max-width:640px">
+                    <input type="text" class="form-control" id="pm_redirect_uri" readonly value="">
+                    <button class="btn btn-outline-secondary" type="button" id="pm_copy_redirect">复制</button>
+                  </div>
+                </li>
+                <li>创建后把 <b>Client ID</b> 与 <b>Client Secret</b> 填到下面，保存，再点「连接 Google 账号」。</li>
+              </ol>
+              <div class="small text-muted">
+                授权页会要求「查看您的 Postmaster 数据」与「验证网站所有权」两项权限，<b>两项都要勾</b>。
+                不勾全，Google 不会返回长期凭据，表现成"连上了但一刷新就掉"。
+              </div>
+            </details>
+
+            <div class="row g-2 align-items-end mb-2">
+              <div class="col-md-5">
+                <label class="form-label small mb-1">Client ID</label>
+                <input type="text" class="form-control form-control-sm" id="pm_client_id"
+                       placeholder="xxxxxxxx.apps.googleusercontent.com" autocomplete="off">
+              </div>
+              <div class="col-md-5">
+                <label class="form-label small mb-1">Client Secret
+                  <span class="text-muted">（不改就留空）</span></label>
+                <input type="password" class="form-control form-control-sm" id="pm_client_secret"
+                       placeholder="GOCSPX-…" autocomplete="new-password">
+              </div>
+              <div class="col-md-2">
+                <button class="btn btn-sm btn-primary w-100" id="pm_save_oauth">保存</button>
+              </div>
+            </div>
+            <div class="small text-muted">
+              保存后，Secret 会被<b>加密存放</b>（AES-256-GCM），界面与日志都不会再显示明文。
+            </div>
+          </div>
+
+          <div id="pm_oauth_on" style="display:none">
+            <div class="d-flex flex-wrap gap-2 align-items-center">
+              <button class="btn btn-sm btn-primary" id="pm_connect">
+                <i class="bi bi-box-arrow-up-right"></i> 连接 Google 账号
+              </button>
+              <button class="btn btn-sm btn-outline-secondary" id="pm_reconfig">修改凭据</button>
+              <button class="btn btn-sm btn-outline-danger" id="pm_disconnect">断开</button>
+            </div>
+            <div class="small text-muted mt-2">
+              点「连接」会跳到 Google 授权页。授权完成后会自动跳回来。
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 第二步 / 域名列表 ============ -->
+      <div class="card mb-3">
+        <div class="card-header d-flex flex-wrap align-items-center gap-2">
+          <b>第二步 · 域名验证</b>
+          <span class="badge bg-secondary" id="pm_stat_total">-</span>
+          <span class="badge bg-success" id="pm_stat_verified">-</span>
+          <span class="badge bg-warning text-dark" id="pm_stat_pending">-</span>
+          <div class="ms-auto d-flex gap-2">
+            <button class="btn btn-sm btn-outline-primary" id="pm_sync">
+              <i class="bi bi-arrow-repeat"></i> 同步数据
+            </button>
+            <button class="btn btn-sm btn-secondary" id="pm_refresh">
+              <i class="bi bi-arrow-clockwise"></i> 刷新
+            </button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="alert alert-secondary small mb-2" id="pm_cf_hint" style="display:none">
+            <b>未检测到可用的 Cloudflare Token</b>，所以系统<b>不会</b>自动写 DNS。
+            这不影响使用：下面每个域的「应存在的 DNS 记录」会照常算好，你把<b>类型 / 名称 / 值</b>
+            三列复制到你的 DNS 服务商处即可。
+            <br>想让系统代写，去 <b>本页上方的「Resend 号池」标签页</b> 配置 Cloudflare API Token
+            （需要该域所在 zone 的 DNS 编辑权限）。
+          </div>
+          <div class="small text-muted mb-2">
+            每个域都需要在 DNS 里加一条 Google 给的记录，验证通过后 Google 才把该域的信誉数据开放给你。
+            <br>「记录」列显示的<b>就是应该存在 DNS 里的东西</b>；系统会尝试自动写入 Cloudflare，
+            写不进去（域名不在 Cloudflare、或未配置 CF Token）时会保留可直接复制的手工记录。
+          </div>
+          <div class="table-responsive">
+            <table class="table table-striped align-middle" id="pm_domains_table">
+              <thead>
+                <tr>
+                  <th style="width:19%">域名</th>
+                  <th style="width:11%">状态</th>
+                  <th style="width:34%">应存在的 DNS 记录</th>
+                  <th style="width:22%">健康摘要</th>
+                  <th style="width:14%">操作</th>
+                </tr>
+              </thead>
+              <tbody id="pm_domains_body">
+                <tr><td colspan="5" class="text-center text-muted py-3">正在加载域名状态…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 第三步：手工粘贴记录 ============ -->
+      <div class="card mb-3">
+        <div class="card-header">
+          <b>第三步（可选）· 手工粘贴 Google 给的记录</b>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">
+            <b>没有连接 Google 账号时用这条路</b>：去
+            <a href="https://postmaster.google.com/" target="_blank" rel="noopener">postmaster.google.com</a>
+            → 右下角 <b>＋</b> → 输入域名 → 它会显示一条 TXT 或 CNAME 记录。
+            把那条记录<b>原样</b>粘贴到下面，系统会写好 DNS 并告诉你下一步。
+            <br>没有 Cloudflare 时，粘贴后会直接把"该去你的 DNS 服务商加什么"算好给你复制。
+          </div>
+          <div class="row g-2 align-items-end">
+            <div class="col-md-3">
+              <label class="form-label small mb-1">域名</label>
+              <input type="text" class="form-control form-control-sm" id="pm_manual_domain" placeholder="example.com">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label small mb-1">记录类型</label>
+              <select class="form-select form-select-sm" id="pm_manual_method">
+                <option value="DNS_TXT">TXT（Google 显示 TXT 时选这个）</option>
+                <option value="DNS_CNAME">CNAME（显示两段值时选这个）</option>
+              </select>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label small mb-1">Google 给的记录值</label>
+              <input type="text" class="form-control form-control-sm" id="pm_manual_token"
+                     placeholder="google-site-verification=… 或 标签 目标">
+            </div>
+            <div class="col-md-2">
+              <button class="btn btn-sm btn-primary w-100" id="pm_manual_save">写入并保存</button>
+            </div>
+          </div>
+          <div class="small text-muted mt-2">
+            <b>CNAME 的粘贴要领</b>：Google 给你的是<b>两段</b>（上面一行标签、下面一行目标）。
+            把它们用<b>一个空格</b>接起来粘进去，例如
+            <code>yja3uiatwhx3 gv-hhiylnceqtxskw.dv.googlehosted.com</code>。
+            系统会自动拆成「记录名」和「记录值」两列 ——
+            这一拆分是最容易做错的地方（整串当成值写下去，记录也建得出来，但 Google 永远验不过）。
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 排错指引 ============ -->
+      <div class="card mb-3">
+        <div class="card-header"><b>域名验证不过？按这张表对着查</b></div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table table-sm">
+              <thead>
+                <tr><th style="width:26%">现象</th><th style="width:34%">多半是</th><th style="width:40%">怎么办</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>状态一直是「DNS 已写入，待 Google 确认」</td>
+                  <td>DNS 还没传播，或 Google 还没来复核</td>
+                  <td>DNS 一般几分钟生效，慢的要几小时。点「同步数据」让系统代你请 Google 复核一次；
+                      也可以自己去 postmaster.google.com 点「验证」。<b>别急着删记录重来</b>。</td>
+                </tr>
+                <tr>
+                  <td>Google 里点验证报"找不到记录"</td>
+                  <td>记录名或记录值写错</td>
+                  <td>对比本页「应存在的 DNS 记录」三列（类型 / 名称 / 值）与实际 DNS；
+                      TXT 必须写在<b>域名本身</b>上（不是 <code>www</code> 也不是 <code>@</code> 之外的前缀）。</td>
+                </tr>
+                <tr>
+                  <td>CNAME 加了但怎么都不通过</td>
+                  <td>粘成了整串，或被 Cloudflare 代理了</td>
+                  <td>CNAME 必须是<b>标签 → 目标</b>两段；且这条记录<b>不能开启 Cloudflare 代理</b>（小云朵要变灰），
+                      否则解析出来的是 Cloudflare 的 IP，Google 看不到目标值。</td>
+                </tr>
+                <tr>
+                  <td>同步报「已授权，但没有这个域的权限」</td>
+                  <td>加域用的 Google 账号 ≠ 授权的账号</td>
+                  <td>核对本页显示的已连接邮箱，与你在 postmaster.google.com 里登录的是不是同一个。</td>
+                </tr>
+                <tr>
+                  <td>同步报「API 还没在该项目里启用」</td>
+                  <td>少启用了某个 API（或刚启用还没生效）</td>
+                  <td>回 Cloud Console 确认 <code>Gmail Postmaster Tools API</code> 与
+                      <code>Site Verification API</code> 都已启用，等 1~2 分钟再同步。</td>
+                </tr>
+                <tr>
+                  <td>验证通过了，但一直「暂无数据」</td>
+                  <td>发送量不够</td>
+                  <td>Google 只对达到一定体量的发信方出数据。这是<b>正常现象</b>，继续用养号功能积累即可。</td>
+                </tr>
+                <tr>
+                  <td>「连接 Google 账号」跳转后报 redirect_uri_mismatch</td>
+                  <td>重定向 URI 没登记或填错</td>
+                  <td>把本页「第一步」里那条地址<b>原样</b>复制到 Cloud Console 的
+                      「已授权的重定向 URI」里，一字不差（含 <code>https://</code> 与结尾的
+                      <code>/inc/ajax/postmaster.php</code>）。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>

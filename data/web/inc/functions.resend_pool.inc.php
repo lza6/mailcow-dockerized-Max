@@ -45,7 +45,7 @@ function resend_pool_setting_get($pdo, $key) {
     $st->execute(array(":k" => (string)$key));
     $v = $st->fetchColumn();
     return ($v === false) ? null : (string)$v;
-  } catch (Exception $e) {
+  } catch (Throwable $e) {
     return null;
   }
 }
@@ -67,7 +67,7 @@ function resend_pool_setting_set($pdo, $key, $value) {
     $del->execute(array(":k" => $key));
     $st->execute(array(":k" => $key, ":v" => (string)$value));
     return true;
-  } catch (Exception $e) {
+  } catch (Throwable $e) {
     return false;
   }
 }
@@ -79,7 +79,7 @@ function resend_pool_setting_set($pdo, $key, $value) {
 function resend_pool_cf_token($pdo, $redis) {
   $dbv = resend_pool_setting_get($pdo, "cf_api_token");
   if ($dbv !== null && $dbv !== "") {
-    if ($redis) { try { $redis->setex("RESEND_POOL_CF_TOKEN", 600, $dbv); } catch (Exception $e) {} }
+    if ($redis) { try { $redis->setex("RESEND_POOL_CF_TOKEN", 600, $dbv); } catch (Throwable $e) {} }
     return $dbv;
   }
   // 兼容：库里没有但 redis 有（老部署）——把它迁回库里，实现一次性自动迁移
@@ -87,7 +87,7 @@ function resend_pool_cf_token($pdo, $redis) {
     try {
       $rv = $redis->get("RESEND_POOL_CF_TOKEN");
       if ($rv) { resend_pool_setting_set($pdo, "cf_api_token", $rv); return (string)$rv; }
-    } catch (Exception $e) {}
+    } catch (Throwable $e) {}
   }
   return "";
 }
@@ -407,9 +407,10 @@ function resend_pool_write_dns($domain, $records) {
   // ⚠️ 必须同时声明 $pdo。这里的 $pdo 要传给 resend_pool_cf_token()，
   // 而后者会用它调 resend_pool_setting_get($pdo, ...)。
   // 漏掉这行时 $pdo 在函数作用域内是 undefined → null → `null->prepare()` 抛的是
-  // **Error**（PHP 8 里不是 Exception），沿途各层的 catch (Exception) 全都接不住，
+  // **Error**（PHP 8 里不是 Exception），只 catch (Exception) 的层全都接不住，
   // 最终逃到 ajax 顶层变成 HTTP 500 —— 症状是点「绑定域名」直接报服务器内部错误，
   // 且因为崩在第②步，Resend 侧域名已创建、本地却什么都没落库（留下脏状态）。
+  // → 本文件已统一改为 catch (Throwable)；新增 try/catch 时请沿用，不要写 Exception。
   global $pdo, $redis;
   $cf_token = resend_pool_cf_token($pdo, $redis);
   if (!$cf_token || empty($records)) {
@@ -438,7 +439,15 @@ function resend_pool_write_dns($domain, $records) {
     if (!empty($rec['priority'])) {
       $body['priority'] = (int)$rec['priority'];
     }
-    if ($type !== 'CNAME') {
+    // proxied 必须**显式给 false**，不能靠"不是 CNAME 就省略"：
+    //   · TXT / MX 本就不支持代理（CF 只接受 false，省略与 false 等价）；
+    //   · CNAME **支持**代理，省略时走的是 CF 的默认值 —— 在开了橙云的 zone 上，
+    //     新建 CNAME 会被默认代理（橙云）：DNS 只回 CF 的泛播 IP、真实目标藏在
+    //     CF 后面。而 Google 的域名所有权验证（DNS_CNAME → gv-*.dv.googlehosted.com）
+    //     恰恰要求目标能被**原样解析到**。代理一生效，记录建得出来、CF 面板看着也对，
+    //     Google 却永远验不过 —— 正是本模块反复要避免的"看起来做完了其实没做"。
+    //     凡是签发来给第三方做**校验/验证**的记录，一律直连（灰云）。
+    if ($type === 'CNAME' || $type === 'TXT' || $type === 'MX') {
       $body['proxied'] = false;
     }
     // 查是否已存在

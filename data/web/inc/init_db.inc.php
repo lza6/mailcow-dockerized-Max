@@ -33,10 +33,17 @@ function init_db_schema()
      * 起因：中继会重写 Message-ID，拿本地 message_id 去收件人邮箱反查永远落空，
      * 「垃圾箱率」因此恒为 0 且永远查不出错。详见该列定义处的注释。
      *
-     * 两条都提升到 13102026_0200 —— 不改这里，新列在已有部署上永远加不上
-     * （init_db 在版本相同时会直接返回）。
+     * 2026-10-13（同日第三次）：新增 `postmaster_domains`
+     * （Google Postmaster Tools 的域名验证与健康数据状态）。
+     *
+     * 这几条都提升到当前的 13102026_0300 —— 不改这里，新表/新列在已有部署上
+     * 永远加不上（init_db 在版本相同时会直接 return，且不报错）。
+     *
+     * ⚠️ 顺序也是坑：`prerequisites.inc.php` 每个 web 请求都会跑一遍 init_db。
+     *    改完本文件**必须先重启 php-fpm** 再执行，否则旧字节码会拿旧表定义做对账，
+     *    把刚加的列**删掉**并把版本号写回旧值（见记忆 mailcow-hot-reload-behavior）。
      */
-    $db_version = "13102026_0200";
+    $db_version = "13102026_0300";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
@@ -227,6 +234,62 @@ function init_db_schema()
             "domain" => array("domain")
           ),
           "account_id" => array("account_id")
+        ),
+        "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+      ),
+      // Google Postmaster Tools 的「域名所有权验证 + 健康数据」状态。
+      //
+      // 与 resend_domains 是**两件独立的事**，别合并：
+      //   resend_domains  = 我们的中继商（Resend）认不认这个域，决定能不能发信；
+      //   postmaster_*    = Google 认不认这个域，决定我们能不能看到 Gmail 官方
+      //                     给出的域/IP 信誉与垃圾投诉率（"会不会进垃圾箱"的唯一权威来源）。
+      // 两个都验证通过了邮件也未必进收件箱，但缺任何一个都只能靠猜。
+      "postmaster_domains" => array(
+        "cols" => array(
+          "id" => "INT NOT NULL AUTO_INCREMENT",
+          "domain" => "VARCHAR(255) NOT NULL",
+          "active" => "TINYINT(1) NOT NULL DEFAULT '1'",
+          "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
+          // DNS_TXT / DNS_CNAME；空 = 还没拿到 token
+          "verify_method" => "VARCHAR(16) NOT NULL DEFAULT ''",
+          // Google 给的 token **原文**。DNS_TXT 时它就是整条记录值；
+          // DNS_CNAME 时是「标签 目标」两段拼在一起（解析规则见 pm_dns_record()）。
+          // 存原文而不是解析后的结果，是为了 D-CNAME 换格式时能原样重放排查。
+          "verify_token" => "TEXT NULL DEFAULT NULL",
+          // 我们实际写进 DNS 的那条记录（相对标签 / 类型 / 值）。
+          // 存下来才能在界面上如实显示"到底写了什么"，也是撤销时的依据。
+          "dns_name" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          "dns_type" => "VARCHAR(8) NOT NULL DEFAULT ''",
+          "dns_content" => "VARCHAR(512) NOT NULL DEFAULT ''",
+          "dns_written_at" => "DATETIME(0) NULL DEFAULT NULL",
+          // unknown / pending / dns_written / verified / failed
+          "verify_status" => "VARCHAR(24) NOT NULL DEFAULT 'unknown'",
+          "verified_at" => "DATETIME(0) NULL DEFAULT NULL",
+          // 该域是否已出现在 Postmaster 的域列表里（GET /v1/domains 的结果）。
+          // 「已验证」和「已注册」是两件事：Search Console 里验过的域会自动出现在
+          // Postmaster 列表里，但我们本地可能从没走过验证流程。
+          "registered" => "TINYINT(1) NOT NULL DEFAULT '0'",
+          // 最近一次拉到的汇总（pm_summarize_stats() 的输出，JSON）
+          "health_json" => "MEDIUMTEXT NULL DEFAULT NULL",
+          "health_synced_at" => "DATETIME(0) NULL DEFAULT NULL",
+          // 最近一次失败的原因（已翻译成人话，见 pm_explain_error）
+          "last_error" => "VARCHAR(255) NOT NULL DEFAULT ''"
+        ),
+        "keys" => array(
+          "primary" => array(
+            "" => array("id")
+          ),
+          // domain 必须是**唯一键**，不能只靠应用层 SELECT-then-INSERT 防重：
+          // 管理员连点两次「取记录」、或两个标签页同时操作时，
+          // 两边的 SELECT 都会是 0 行 → 同一个域被插成两条 →
+          // 状态更新只命中其中一条，另一条永远停在旧状态，
+          // 「同步」还会把健康数据写进那一条、界面上却看另一条。
+          "unique" => array(
+            "domain" => array("domain")
+          ),
+          "key" => array(
+            "verify_status" => array("verify_status")
+          )
         ),
         "attr" => "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
       ),

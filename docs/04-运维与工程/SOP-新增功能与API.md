@@ -92,6 +92,12 @@ $('tbody').filter(function(){ return $(this).children().length < 1; }).remove();
 | 测试脚本用管道包住写请求 | token 在子 shell 里丢失 → 报"参数不合法"，像产品 bug | 写请求绝不放管道；输出先落文件再截断 |
 | 声称"页面正常"只看响应体 | 前端根本没渲染 | 用 jsdom 加载**真实页面 + 真实 bundle** 验证渲染结果 |
 | 远端 main 与本地 master 无共同祖先 | 直接 push 被拒 | `fetch max/main` → cherry-pick → 快进推送，**绝不 force push** |
+| jsdom 里 `require('jquery')` 先于挂 `global.window` | 报 "jQuery requires a window with a document"，**看起来像依赖没装** | 先建 DOM、挂 `global.window/document`，**再** require jquery（见 `test-js-postmaster.mjs` 注释） |
+| jsdom 里用 `$.ajaxPrefilter` 拦 `$.getJSON` | 拦下来了但 `render()` 不执行 | `$.getJSON` 的成功链在 prefilter 之后；直接**替换 `$.getJSON`**，并且要在**注入被测脚本之前**替换（脚本 ready 时会立刻自拉一次） |
+| 逐日累加比例型指标 | 7 天 × 0.5% → 3.5 → 界面显示「350%」 | 比例（errorRatio 等）**按"有数据的天"求平均**，不要相加；另暴露 `days`/`max` 供判断"偶发尖峰 vs 持续问题" |
+| Cloudflare 写验证类 CNAME 不给 `proxied` | 记录建得出来、面板看着正常，第三方却永远验不过（橙云把目标藏了） | 验证/签发类记录（TXT/CNAME/MX）一律**显式 `proxied: false`** |
+| PHP 8 里只 `catch (Exception)` | `null->method()` / 未定义变量抛的是 **`Error`**，接不住 → 一路逃成 HTTP 500 | 新代码统一 `catch (Throwable)`；`functions.resend_pool.inc.php` 曾因此整个绑定流程崩在中间、留下脏状态 |
+| 本地容器（`~/mailcow-e2e`）落后于仓库 | 测试报"文件不存在"，看着像部署缺口，其实是快照旧 | 跑测试前先 `docker compose cp` 同步改动过的文件；别把容器状态当成代码事实 |
 
 ---
 
@@ -115,6 +121,20 @@ $('tbody').filter(function(){ return $(this).children().length < 1; }).remove();
 
 ### 3.4 生产部署
 按 §1 的影响面表执行；**先语法检查再落盘**（`php -l` / `bash -n` / `node --check`）。
+
+**涉及凭据保管箱时必须先确认目录可写**（否则功能静默不可用）：
+
+```bash
+# php-fpm worker 以 www-data(82) 运行；绑定挂载源目录若由 docker 自动创建，
+# 会是 root:root 0755 → www-data 写不了 secret.key → 所有"保存敏感凭据"全部失败。
+ls -ln data/conf/warmup            # 看属主
+# 正确做法（按容器里 www-data 的 uid/gid）：
+chown -R 82:82 data/conf/warmup && chmod 700 data/conf/warmup
+```
+
+影响的路径：Postmaster 的 OAuth Client Secret、养号的收件人 IMAP/SMTP 密码。
+界面**会明确报错**（"…加密失败，未保存：请确认 /warmup-secrets 目录可读可写"），
+不会假装保存成功 —— 但功能确实不可用，所以部署时就要查。
 
 ### 3.5 验收（每条都要有真实证据）
 | 验收类型 | 工具 | 必跑条件 |

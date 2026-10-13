@@ -1,125 +1,136 @@
-# Google Postmaster Tools 接入操作指南
+# Google Postmaster Tools 接入指南（Web UI 内完成）
 
-> 目的：获取 Google **官方**给出的域名信誉评分与垃圾邮件率数据
-> 这是唯一能看到 Google 内部判定的途径
+> 目的：拿到 Google **官方**给出的域名信誉、垃圾投诉率与认证通过率数据。
+> 这是唯一能看到 Google 内部判定的途径 —— 别的渠道（SPF/DKIM 检查器、种子收件箱）
+> 只能告诉你"技术上能不能过"，告诉不了你"Gmail 到底怎么看你"。
 
----
-
-## 为什么必须你本人操作
-
-Google 强制验证**域名所有权**，验证记录由 Google 在你登录后动态生成，
-**无法由 API 或第三方代生成**。你只需做「登录 + 添加域名 + 把验证码给我」，
-其余（写入 DNS）我全自动完成。
+**入口**：mailcow 后台 → `系统` → `Postmaster Tools` 标签页。
 
 ---
 
-## 操作步骤（约 5 分钟）
+## 这个功能做什么
 
-### 第 1 步：登录并添加域名
+界面把整条链路拆成"看得见每一步在干嘛"的四段，每段都会告诉你
+**当前处于哪一步**、**下一步该点什么**、**卡住了去查哪里**：
 
-1. 打开 <https://postmaster.google.com/>
-2. 用你的 Google 账号登录
-3. 点击右下角 **＋** 按钮
-4. 输入域名，例如 `urbansproutglobal.com`
-5. 点击 **下一步**
+| 阶段 | 谁来做 | 界面表现 |
+|---|---|---|
+| 1. 授权 Google 账号（OAuth） | 点一次按钮 | 显示已连接账号的邮箱；未连接时给出手工路径 |
+| 2. 取验证记录（token） | 自动 | 显示要写入的记录名与值，可一键复制 |
+| 3. 把记录写进 DNS | 自动（有 CF Token 时）/ 手工 | 显示"已写入 Cloudflare"或"请手工添加"+ 原因 |
+| 4. 请 Google 确认所有权 | 自动 / 一键 | 徽章：`未开始` → `待验证` → `DNS 已写入，待 Google 确认` → `已验证` |
 
-### 第 2 步：获取验证记录
-
-Google 会显示一条 TXT 记录，形如：
-
-```
-类型：TXT
-名称：@   （或显示为裸域名）
-值：  google-site-verification=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-**把这个值复制给我**（整串 `google-site-verification=...`）。
-
-### 第 3 步：我把记录写入 Cloudflare
-
-我收到后会：
-1. 用 Cloudflare API 写入 TXT 记录
-2. 验证公网可见
-3. 告诉你「可以点验证了」
-
-### 第 4 步：回 Google 点「验证」
-
-回到 Postmaster Tools 页面，点击 **验证**。
-
-### 第 5 步：等数据（关键）
-
-**注意**：Postmaster Tools 的**信誉与垃圾率数据需要一定发送量才会显示**。
-官方要求是「达到一定量级」后才会出数据，通常需要**每天数百封以上**的稳定发送。
-
-**在当前低发送量下，可能只能看到「暂无数据」** —— 这是正常的，不是操作失败。
+数据同步（域名信誉 / 垃圾率 / 认证通过率 / 投递错误）在验证通过后自动进行，
+另有 6 小时一次的定时任务兜底。
 
 ---
 
-## 能看到的四种数据
+## 两种用法
+
+### A. 连 Google 账号（推荐，全自动）
+
+1. 到 <https://console.cloud.google.com/> 建一个项目（或用已有的）
+2. **API 和服务 → 库**，启用这两个：
+   - `Gmail Postmaster Tools API`
+   - `Site Verification API`
+3. **API 和服务 → OAuth 同意屏幕**：类型选「外部」，把加域名的那个 Google 账号
+   填进「测试用户」（未发布应用时这一步是必须的，否则授权会被拒）
+4. **凭据 → 创建凭据 → OAuth 客户端 ID**：类型选「Web 应用」，
+   **已获授权的重定向 URI** 填界面上显示的那一条（点「复制」拿到，别手打）
+5. 把 Client ID / Client Secret 填进界面 → 保存 → 点「连接 Google 账号」
+
+连接后回到域名表，对每个域名点「取记录」即可，后面的写入与提交验证都会自动走。
+
+> ⚠️ **授权用的 Google 账号必须和"加域名的那个"是同一个。**
+> Postmaster 的数据只对「已在该账号下验证过所有权」的域开放；
+> 账号不一致时接口会返回 403，界面会翻译成"已授权，但没有这个域的权限"。
+
+### B. 不连 Google 账号（手工路径）
+
+也用得：
+
+1. 自己去 <https://postmaster.google.com/> 加域名，Google 会给你一条验证记录
+2. 把那条记录**粘进界面下方的「手工粘贴」卡片**，选对验证方式
+3. 界面把它规范化成一条正确的 DNS 记录并显示出来，能自动写就自动写，
+   写不了就给你可复制的记录名 + 值
+4. 记录生效后，回 Postmaster 网页点「验证」
+
+这条路径**不需要任何 Google API 授权**，界面在任何时候都保留它。
+
+---
+
+## 两种验证方式，记录形态完全不同（最容易写错的地方）
+
+| 方式 | Google 给的 token | 实际要写的记录 |
+|---|---|---|
+| `DNS_TXT` | `google-site-verification=dQKNG_p2Y7W6...` | TXT `@`（域顶点）值就是 token 原文 |
+| `DNS_CNAME` | `yja3uiatwhx3 gv-hhiylnceqtxskw.dv.googlehosted.com` | **按空格劈成两段**：名字=`yja3uiatwhx3`，值=`gv-hhiylnceqtxskw.dv.googlehosted.com` |
+
+`DNS_CNAME` 的 token 是**「记录名 + 空格 + 记录值」拼起来的一整串**。
+把它整串当成 CNAME 的"值"直接写下去，记录会建出来、也不报错，
+但 Google 永远验不过 —— 典型的"看起来做完了其实没做"。
+界面已经处理了这个拆分，手工粘贴时也会校验形态对不对。
+
+> ⚠️ 用 Cloudflare 时，验证类记录必须**直连（灰云）**。
+> CNAME 默认会被代理（橙云），DNS 查询只回 CF 的泛播 IP、真实目标藏在后面，
+> Google 就查不到你要证明的那条记录。界面的写入通道统一按 `proxied=false` 写。
+
+---
+
+## 看不到数据？按这个顺序排查
+
+| 现象 | 大概率原因 | 怎么办 |
+|---|---|---|
+| 徽章停在 `待验证` | 还没写入 DNS，或未点「提交验证」 | 点「取记录」→ 确认记录已写入 → 点「提交验证」 |
+| 徽章停在 `DNS 已写入，待 Google 确认` | DNS 还在传播（通常几分钟~几小时） | 等下一轮自动复核；超过 24 小时看下一条 |
+| 徽章变 `验证失败`（红） | **再等也不会好**的可恢复性为零的错 | 看域名下面的红字原因，通常是"域在别的账号下"或"API 未启用" |
+| 同步报 403 | 授权账号 ≠ 加域名的账号 | 用加域名的那个 Google 账号重新授权 |
+| 同步报 403，提示 API 未启用 | Cloud 项目里漏启用了 | 两个 API 都启用，等 1~2 分钟重试 |
+| 同步报 404 | 该域还没在 Postmaster 里添加 | 先去 postmaster.google.com 添加并验证 |
+| 数据一直是「暂无数据」 | **发送量不足**（最常见，且不是故障） | 见下方说明 |
+
+### 「暂无数据」是正常的
+
+Postmaster Tools 的统计**需要一定发送量才会出数**。在低发送量下，
+界面显示「暂无数据」是 Google 那边就没给你数据，不是操作失败。
+Google 的数据本身还有 1~2 天延迟，且新域在积累到量级前当天的条目可能是空的 ——
+界面已按"只统计有数据的天"求平均，不会把空天当成 0 拉低平均值。
+
+---
+
+## 界面上四个数据项怎么读
 
 | 数据项 | 含义 | 健康标准 |
 |---|---|---|
-| **域名信誉** | Google 对你域名的整体评价 | High / Medium 为佳，Bad 需立即处理 |
-| **IP 信誉** | 发信 IP 的评价 | 共享 IP 会显示中继商的表现 |
-| **垃圾邮件率** | 用户举报比例 | **必须 < 0.30%**，建议 < 0.10% |
-| **投递错误** | SPF/DKIM/DMARC 失败等 | 应为 0 |
+| **域名信誉** | Google 对你域名的整体评价 | High / Medium 为佳；Bad 需立即处理 |
+| **用户投诉垃圾率** | **收件人主动点举报**的比例（不是"被判成垃圾的比例"） | 必须 < 0.30%，建议 < 0.10% |
+| **SPF / DKIM / DMARC 通过率** | 认证成功率 | 应 ≥ 99.5% |
+| **投递错误** | 按错误类型分组的占比 | 界面显示**日均**占比 + 出现天数 + 单日最高 |
+
+> **投递错误为什么显示"日均 + 单日最高"两个数？**
+> `errorRatio` 是**单日**的比例。逐日相加没有物理含义 ——
+> 7 天各 0.5% 相加会变成 3.5，显示成「350%」，一个物理上不可能的数。
+> 所以界面按"有错误的天"求平均（与 SPF/DKIM 同口径），
+> 另外单独给出出现天数与单日最高：**平均低但单日最高高 = 某一天集中爆过**，
+> **平均和最高都高 = 持续性问题**，两种情况的处理方式完全不同。
 
 ---
 
-## 15 个域名清单（逐个添加）
+## 用 Search Console 验证过的域可以直接用
 
-```
-urbansproutglobal.com
-breezeshelf.com
-brightcrateglobal.com
-cedarcartco.com
-cedarloomexporthouse.com
-echolanecommerce.com
-harborpinetradeworks.com
-hearthcart.com
-indigobasketglobal.com
-larkhavensupplyworks.com
-mangobridgeretail.com
-maplevalleytrading.com
-summitnestretail.com
-trendhollowretail.com
-xiaomillc.com
-```
+如果某个域已经在 **Google Search Console** 验证过所有权，
+Postmaster Tools 会**自动识别**，不需要再单独加一遍验证记录 ——
+只要用**同一个 Google 账号**授权，同步时它就会出现在已收录列表里。
 
 ---
 
-## 替代方案：Search Console
+## 相关文件（给维护者）
 
-如果你已在 **Google Search Console** 验证过这些域名，
-Postmaster Tools 会**自动识别**，无需重复添加验证记录。
-
-检查方法：登录 <https://search.google.com/search-console> 看是否有这些域。
-
----
-
-## 写入验证记录的命令（供执行方参考）
-
-```bash
-# 收到验证码后执行
-CF_TOKEN="<token>" ZONE_ID="<zone_id>" DOMAIN="<domain>"
-curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
-  -H "Authorization: Bearer ${CF_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{\"type\":\"TXT\",\"name\":\"${DOMAIN}\",\"content\":\"google-site-verification=xxxx\",\"ttl\":300}"
-```
-
----
-
-## 常见问题
-
-**Q：为什么看不到数据？**
-A：发送量不足。Postmaster Tools 只对达到一定体量的发件人展示数据。
-
-**Q：验证后多久出数据？**
-A：通常 24-48 小时，但前提是发送量达标。
-
-**Q：一个 Google 账号能验证多个域名吗？**
-A：可以，数量不限。
-
-**Q：数据准吗？**
-A：这是 Google 官方数据，是所有渠道里最权威的。
+| 想找什么 | 去哪 |
+|---|---|
+| 纯判定逻辑（可离线测试） | `data/web/inc/postmaster_lib.inc.php` |
+| 联网与落库 | `data/web/inc/functions.postmaster.inc.php` |
+| AJAX 端点 | `data/web/inc/ajax/postmaster.php` |
+| 界面模板 / 脚本 | `data/web/templates/admin/tab-config-postmaster.twig`、`data/web/js/site/postmaster.js` |
+| 定时同步 | `data/conf/phpfpm/crons/postmaster_sync.php`（每 6 小时） |
+| 测试三件套 | `.github/scripts/test-postmaster.php`、`test-render-postmaster.php`、`test-js-postmaster.mjs` |

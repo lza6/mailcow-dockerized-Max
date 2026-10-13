@@ -258,6 +258,8 @@ docker compose logs --since 24h postfix-mailcow
 | 域名健康判定逻辑（**纯函数，可离线测试**） | `data/web/inc/domain_health_lib.inc.php` |
 | 并发 DNS 原语（A/MX/TXT/PTR，**只做 I/O**） | `data/web/inc/dns_parallel.inc.php` |
 | **测试入口** | `.github/scripts/test-runner.php`、`test-domain-health.php`、`test-render-domain-health.php`、`test-dns-parse.php`、`test-lang-fallback.php`、`helper-scripts/cf-email-bridge/test_bridge.py`（均可从仓库根直接调用，无第三方依赖） |
+| **Postmaster 测试三件套** | `.github/scripts/test-postmaster.php`（纯逻辑）、`test-render-postmaster.php`（Twig 渲染 + 模板↔JS 契约）、`test-js-postmaster.mjs`（**jsdom 真实 DOM 行为**，需先 `npm ci --prefix .github/scripts/js-harness`）。三层各守一段：数算对 / id 对上 / 界面显示成对的字 |
+| **为什么需要 jsdom 那一层** | PHP 测不出渲染 bug —— 字段读错只会安静地显示 `NaN%` 或整块空白，不报错、不崩。`test-js-postmaster.mjs` 把页面真跑起来、喂数据、**读回 DOM 文本**断言 |
 | **项目文档总目录** | `docs/README.md`（投递与信誉 / 接入指南 / 功能设计 / 运维与工程） |
 | 养号（Warmup）功能 | `data/web/inc/functions.warmup.inc.php`、`docs/03-功能设计/养号功能-任务台账.md` |
 | Resend 号池功能 | `data/web/inc/functions.resend_pool.inc.php`、`docs/03-功能设计/Resend号池-*.md` |

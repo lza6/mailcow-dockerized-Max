@@ -83,3 +83,7 @@ data/conf/postfix/postfix-tlspol
 
 # 养号凭据保管箱的密钥 —— 绝不入库
 data/conf/warmup/
+
+# 前端 DOM 测试（js-harness）装下来的依赖 —— 可再生，不入库。
+# 仓库此前没有任何 node_modules，加这条是防止 CI 依赖被误提交。
+node_modules/
