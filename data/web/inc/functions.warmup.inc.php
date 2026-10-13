@@ -184,6 +184,32 @@ function warmup_pause($pdo, $planId, $reason) {
 }
 
 /**
+ * 生成一条养号邮件的**唯一反查标记**。
+ *
+ * 它会被写进 Subject 的括号里，之后靠 `SUBJECT "<token>"` 到收件人的
+ * 收件箱/垃圾箱里反查这封邮件落在哪 —— 这是唯一可靠的锚点：
+ *
+ *   · **Message-ID 不能用**：出站走中继时中继会重写它（实测 Resend 会把
+ *     我们生成的 `<xxx@域>` 换成 `<...@send.域>` 或
+ *     `<...@email.amazonses.com>`），本地记下的 ID 在收件箱里根本不存在。
+ *   · **`HEADER` 搜索也不能用**：PHP 的 `imap_search()` 只接受固定一批
+ *     criterion，`HEADER` / Gmail 的 `X-GM-RAW` 都会被它自己挡掉
+ *     （报 `Unknown search criterion`），根本没发到服务器。
+ *   · **`TEXT` 也不行**：实测 Gmail 的 TEXT 搜索匹配不到 Message-ID 字符串。
+ *
+ * Subject 既不会被中继改写，`SUBJECT` 又是 PHP 明确支持的服务端搜索条件。
+ *
+ * 字符集刻意去掉 I/O/0/1 等易混字符，避免人工核对时看错。
+ */
+function warmup_new_token() {
+  $al = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  $n  = strlen($al) - 1;
+  $s  = '';
+  for ($i = 0; $i < 10; $i++) { $s .= $al[random_int(0, $n)]; }
+  return 'WU' . $s;
+}
+
+/**
  * 用 PHPMailer 经 postfix 发出一封养号邮件
  *
  * @return array array('ok' => bool, 'error' => string)
@@ -202,9 +228,10 @@ function warmup_send_mail($plan, $recipient) {
   $sender = (string)$plan['sender'];
   $domain = (string)$plan['domain'];
   $day    = warmup_day_index($plan);
+  $token  = warmup_new_token();
 
   // 固定模板：不含任何用户输入，杜绝头注入
-  $subject = sprintf('Quick note from %s', $domain);
+  $subject = sprintf('Quick note from %s (ref %s)', $domain, $token);
   $body = "Hi,\n\n"
         . "This is a routine note from our team at {$domain}.\n"
         . "If you need anything, just reply to this email.\n\n"
@@ -221,8 +248,8 @@ function warmup_send_mail($plan, $recipient) {
     $mail->CharSet    = 'UTF-8';
     $mail->Timeout    = 20;
     $mail->XMailer    = '';          // 不暴露库指纹
-    // 显式指定 Message-ID 并回传给调用方 —— 之后要靠它到收件人邮箱里反查
-    // 这封邮件落在收件箱还是垃圾箱（见 functions.warmup_ext.inc.php 的 wwe_find_message）。
+    // 仍然显式指定 Message-ID：它是**存档用**的原始 ID（收件方看到的会被
+    // 中继改写，所以反查不能用它，见 warmup_new_token 的注释）。
     $mail->MessageID  = sprintf('<%s.%d@%s>', bin2hex(random_bytes(10)), time(), $domain);
     $mail->setFrom($sender, $domain);
     $mail->addAddress((string)$recipient['email']);
@@ -230,20 +257,15 @@ function warmup_send_mail($plan, $recipient) {
     $mail->Body    = $body;
     $mail->send();
     return array('ok' => true, 'error' => '',
-                 'message_id' => (string)$mail->MessageID, 'subject' => $subject);
+                 'message_id' => (string)$mail->MessageID, 'subject' => $subject,
+                 'token' => $token);
   } catch (Exception $e) {
     // PHPMailer 异常信息可能含 SMTP 细节，截断后记录
     return array('ok' => false, 'error' => mb_substr($mail->ErrorInfo ?: $e->getMessage(), 0, 200),
-                 'message_id' => '', 'subject' => '');
+                 'message_id' => '', 'subject' => '', 'token' => '');
   }
 }
 
-/**
- * 执行一轮养号调度
- *
- * @param bool $force 忽略"随机时刻"限制（仅用于人工触发/测试）
- * @return array 汇总结果
- */
 /**
  * 记录某个计划本轮被跳过的原因。
  * 没有它的话，界面只能显示「今日未运行」，管理员分不清到底是
@@ -256,7 +278,17 @@ function warmup_mark_skip($pdo, $planId, $reason) {
   } catch (Exception $e) {}
 }
 
-function warmup_run($pdo, $force = false) {
+/**
+ * 执行一轮养号调度
+ *
+ * @param bool $force    忽略"随机时刻"与"错开"限制（仅用于人工触发/测试）
+ * @param int  $onlyPlan 只处理这一个计划（0 = 全部）。用于「按需对某个域
+ *                       单独跑一封」，也是运维脚本对全部账号各跑一封的入口 ——
+ *                       不这样做，就只能靠临时改配置去挑计划。
+ * @param int  $maxBatch 覆盖本轮单计划批量上限（0 = 用 WARMUP_MAX_PER_RUN）
+ * @return array 汇总结果
+ */
+function warmup_run($pdo, $force = false, $onlyPlan = 0, $maxBatch = 0) {
   $result = array(
     'checked'  => 0,
     'skipped'  => array(),
@@ -302,6 +334,7 @@ function warmup_run($pdo, $force = false) {
   }
 
   foreach (warmup_plans($pdo, true) as $plan) {
+    if ($onlyPlan > 0 && (int)$plan['id'] !== $onlyPlan) { continue; }
     $result['checked']++;
 
     if (warmup_is_expired($plan)) {
@@ -323,7 +356,8 @@ function warmup_run($pdo, $force = false) {
     }
 
     // 单次运行批量上限
-    $batch = min($remaining, WARMUP_MAX_PER_RUN, $globalCap - $globalSent);
+    $cap = ($maxBatch > 0) ? $maxBatch : WARMUP_MAX_PER_RUN;
+    $batch = min($remaining, $cap, $globalCap - $globalSent);
     if ($batch <= 0) {
       $result['skipped'][] = $plan['domain'] . ': global cap';
       warmup_mark_skip($pdo, $plan['id'],
@@ -371,13 +405,14 @@ function warmup_run($pdo, $force = false) {
       // 到收件人邮箱核对这封到底进了收件箱还是垃圾箱。
       try {
         $st = $pdo->prepare("INSERT INTO `warmup_messages`
-            (`plan_id`,`recipient_id`,`recipient`,`message_id`,`subject`,`send_ok`,`fail_reason`,`result`)
-            VALUES (:p,:rid,:rc,:mid,:subj,:ok,:fr,:res)");
+            (`plan_id`,`recipient_id`,`recipient`,`message_id`,`message_token`,`subject`,`send_ok`,`fail_reason`,`result`)
+            VALUES (:p,:rid,:rc,:mid,:tok,:subj,:ok,:fr,:res)");
         $st->execute(array(
           ':p'    => (int)$plan['id'],
           ':rid'  => (int)$rc['id'],
           ':rc'   => (string)$rc['email'],
           ':mid'  => mb_substr((string)($r['message_id'] ?? ''), 0, 255),
+          ':tok'  => mb_substr((string)($r['token'] ?? ''), 0, 32),
           ':subj' => mb_substr((string)($r['subject'] ?? ''), 0, 255),
           ':ok'   => $r['ok'] ? 1 : 0,
           ':fr'   => mb_substr((string)($r['error'] ?? ''), 0, 255),
@@ -386,7 +421,9 @@ function warmup_run($pdo, $force = false) {
           // 于是「待判定」计数只增不减，管理员会以为有大量邮件下落不明。
           ':res'  => $r['ok'] ? 'unknown' : 'failed',
         ));
-      } catch (Exception $e) {
+      } catch (Throwable $e) {
+        // 用 Throwable 而不是 Exception：PDO 的某些失败（以及 null 上调用方法）
+        // 抛的是 Error，`catch (Exception)` 接不住，会直接冒到上层。
         error_log('warmup: 写入 warmup_messages 失败: ' . $e->getMessage());
       }
       // 封与封之间留间隔，避免同秒连发。
@@ -615,7 +652,7 @@ function warmup_check_deliveries($pdo, $limit = 20) {
     try {
       $spam = wwe_spam_folder($conn, wwe_ref($cred));
       foreach ($msgs as $m) {
-        $f = wwe_find_message($conn, $m['message_id'], $spam, wwe_ref($cred));
+        $f = wwe_find_message($conn, $m['message_id'], $spam, wwe_ref($cred), (string)$m['message_token']);
         $state = $f['state'];
         if ($state === 'missing') {
           // 找不到就先记 missing 但不落库为终态 —— 可能只是还没投递完，
@@ -719,7 +756,7 @@ function warmup_interact($pdo, $limit = 10) {
   foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $m) {
     $cred = warmup_recipient_cred($pdo, (int)$m['recipient_id']);
     if (!$cred) { continue; }
-    list($ok, $msg) = wwe_rescue_from_spam($cred, $m['message_id']);
+    list($ok, $msg) = wwe_rescue_from_spam($cred, $m['message_id'], (string)$m['message_token']);
     // 无论成败都记一次尝试，避免失败行被反复选中
     $pdo->prepare("UPDATE `warmup_messages`
                       SET `rescue_attempts` = `rescue_attempts` + 1, `last_attempt_at` = NOW(0)

@@ -168,61 +168,90 @@ function wwe_connect($rcpt, $folder = 'INBOX') {
   @imap_timeout(IMAP_READTIMEOUT, WWE_TIMEOUT);
   @imap_timeout(IMAP_WRITETIMEOUT, WWE_TIMEOUT);
 
-  $conn = @imap_open($mb, (string)$rcpt['email'], (string)$rcpt['password'], 0, 1);
-  if ($conn === false) {
-    // imap_errors() 里可能含服务器返回的细节，但不含密码
+  /**
+   * 重试**只针对连接层面的失败**（`[CLOSED] IMAP connection broken`、超时等）。
+   *
+   * 实测 Gmail 会毫无规律地掐断 IMAP 连接：同样的凭据，几秒之后重连就正常。
+   * 不重试的话，一次偶发断连就会让这个收件人整轮判定失败 —— 而且
+   * `warmup_check_deliveries` 在连接失败时是直接 `continue` 的，
+   * 连 `last_check` 都不更新，界面上完全看不出发生过什么。
+   *
+   * **认证失败绝不重试**：那说明凭据不对、或账号被 Google 临时限流。
+   * 继续猛敲只会把限流拖得更久。
+   */
+  $waits = array(0, 2, 5);
+  $msg = 'IMAP 登录失败';
+  foreach ($waits as $wait) {
+    if ($wait > 0) { sleep($wait); }
+    $conn = @imap_open($mb, (string)$rcpt['email'], (string)$rcpt['password'], 0, 1);
+    if ($conn !== false) { return array($conn, ''); }
+
     $errs = @imap_errors();
-    $msg  = is_array($errs) && $errs ? implode('; ', array_slice($errs, 0, 3)) : 'IMAP 登录失败';
     @imap_alerts();
-    return array(false, mb_substr($msg, 0, 200));
+    if (is_array($errs) && $errs) { $msg = implode('; ', array_slice($errs, 0, 3)); }
+    if (stripos($msg, 'AUTHENTICATIONFAILED') !== false
+        || stripos($msg, 'Invalid credentials') !== false) {
+      break;
+    }
   }
-  return array($conn, '');
+  return array(false, mb_substr($msg, 0, 200));
 }
 
 
 /**
- * 在收件箱与垃圾箱里按 Message-ID 找一封邮件。
- * @return array array('state' => 'inbox'|'spam'|'missing', 'uid' => int, 'folder' => string)
- */
-/**
- * 在收件箱与垃圾箱里按 Message-ID 找一封邮件。
+ * 在收件箱与垃圾箱里找一封养号邮件。
  *
- * @param string $ref IMAP 命名前缀（wwe_ref() 的返回值）。**必须传** ——
+ * 优先用 `$token`（写进 Subject 的唯一标记，见 warmup_new_token）——
+ * 这是**唯一可靠**的锚点：
+ *
+ *   1. **Message-ID 不能用。** 出站走中继时中继会重写它：实测 Resend 会把
+ *      我们生成的 `<xxx@域>` 换成 `<...@send.域>` / `<...@email.amazonses.com>`。
+ *      于是拿本地记的 message_id 去收件人邮箱反查**永远找不到**，
+ *      投递判定恒为 unknown —— 而且不报任何错。
+ *   2. **`HEADER` 搜索不能用。** 拦路的是 **PHP 自己**，不是服务器：
+ *      `imap_search()` 只接受固定一批 criterion，`HEADER` 与 Gmail 的
+ *      `X-GM-RAW` 都不在其中，实测直接返回
+ *      `Unknown search criterion: HEADER` / `... X-GM-RAW`，
+ *      请求根本没发到服务器。旧注释写「Gmail 支持 HEADER」是错的。
+ *   3. **`TEXT` 也不能用。** 实测 Gmail 的 TEXT 搜索匹配不到 Message-ID 字符串。
+ *   4. **`SUBJECT` 能用，而且快**（实测 ~0.7s）。Subject 不会被中继改写。
+ *
+ * 没有 token 的历史行（功能上线前发的）退回 `SINCE` + 读头精确比对。
+ *
+ * @param string $ref   IMAP 命名前缀（wwe_ref() 的返回值）。**必须传** ——
  *        imap_reopen() 要的是**带前缀的完整邮箱名**，只给裸串 `'INBOX'`
  *        会重开失败，函数会静默返回 0（实测踩过：垃圾箱那级因为传的是
  *        带前缀的完整名所以能命中，收件箱这级永远找不到）。
+ * @param string $token 唯一标记；为空则走 Message-ID 兜底路径。
  * @return array array('state' => 'inbox'|'spam'|'missing', 'uid' => int, 'folder' => string)
  */
-function wwe_find_message($conn, $messageId, $spamFolder, $ref) {
+function wwe_find_message($conn, $messageId, $spamFolder, $ref, $token = '') {
   $mid = trim((string)$messageId);
-  if ($mid === '') { return array('state' => 'missing', 'uid' => 0, 'folder' => ''); }
+  $tok = trim((string)$token);
+  if ($mid === '' && $tok === '') { return array('state' => 'missing', 'uid' => 0, 'folder' => ''); }
   $bare = strtolower(trim($mid, " \t<>"));
 
-  /**
-   * 在一个文件夹里找这封邮件，返回 uid（找不到 0）。
-   *
-   * 为什么是「三级尝试 + 逐封读头核对」，而不是信一个搜索命令：
-   *
-   * 1. **`HEADER` 搜索并非到处都支持。** 实测本项目的 Dovecot 直接返回
-   *    `Unknown search criterion: HEADER`（字段名加不加引号都一样），Gmail 则支持。
-   * 2. **`TEXT` 也不可靠。** 同样的 Dovecot 上，对 Junk 里的邮件 TEXT 能命中，
-   *    对 INBOX 里的另一封却命中不到（全文检索的分词行为不一致）。
-   * 3. 所以最后必须有一个**不依赖任何搜索语义**的兜底：按日期枚举 + 读头精确比对。
-   *    收件箱是我们自己控制的、要查的又只有最近发出的邮件，代价可以接受。
-   *
-   * 无论哪一级命中，最终都以「读回的 Message-ID 头是否精确相等」为准 ——
-   * 这样既不会被正文里的巧合字符串骗到，也不会因服务器不支持某个搜索词而失效。
-   */
-  $lookup = function ($folder) use ($conn, $bare) {
+  $lookup = function ($folder) use ($conn, $bare, $tok) {
     if ($folder !== '' && !@imap_reopen($conn, $folder)) { return 0; }
 
+    // ① 首选：按唯一 token 搜 Subject（服务端索引，一次往返）
+    if ($tok !== '') {
+      $r = @imap_search($conn, 'SUBJECT "' . addcslashes($tok, '"\\') . '"', SE_UID);
+      @imap_errors();
+      if (is_array($r) && $r) { return (int)$r[0]; }
+      return 0;
+    }
+
     /**
-     * 一次取回所有候选邮件的头，再本地比对 —— **不要逐封 imap_headerinfo**。
+     * ② 兜底（仅历史行）：按日期列出最近 14 天，只读最近 40 封的头精确比对。
      *
-     * 逐封取的话，兜底那级一次最多 300 封候选就是 300 次网络往返；
-     * 一轮判定 20 封邮件 → 6000 次往返，会把 php-fpm worker 拖死。
-     * imap_fetch_overview() 用一个 UID 列表一次拿完（含 message_id），
-     * 往返次数从 O(n) 降到 1。
+     * 一次取回候选邮件的头，再本地比对 —— **不要逐封 imap_headerinfo**：
+     * 逐封就是一次网络往返，而 imap_fetch_overview() 用一个 UID 列表一次
+     * 拿完（含 message_id），往返次数从 O(n) 降到 1。
+     *
+     * ⚠️ 这个 40 的上限直接决定耗时：实测 Gmail 的 imap_fetch_overview 约
+     * 1.3 秒/封（300 封实测 108 秒）。绝不要调大 —— 之前是 300，
+     * 一本 16 封邮件就要跑近一小时，check 永远跑不完。
      */
     $verify = function ($uids, $limit) use ($conn, $bare) {
       $uids = array_slice(array_values((array)$uids), 0, $limit);
@@ -237,30 +266,12 @@ function wwe_find_message($conn, $messageId, $spamFolder, $ref) {
       }
       return 0;
     };
-
-    // ① HEADER 精确搜索（Gmail 等支持它的服务器上最快）
-    $r = @imap_search($conn, 'HEADER Message-ID "' . addcslashes($bare, '"\\') . '"', SE_UID);
-    @imap_errors();
-    if (is_array($r) && $r) {
-      $hit = $verify($r, 30);
-      if ($hit > 0) { return $hit; }
-    }
-
-    // ② TEXT 全文搜索（部分服务器支持；结果仍要读头核对）
-    $r2 = @imap_search($conn, 'TEXT "' . addcslashes($bare, '"\\') . '"', SE_UID);
-    @imap_errors();
-    if (is_array($r2) && $r2) {
-      $hit = $verify($r2, 30);
-      if ($hit > 0) { return $hit; }
-    }
-
-    // ③ 兜底：列出最近 N 天的邮件一次取完头再比对（不依赖任何搜索语义）
     $since = date('d-M-Y', time() - 14 * 86400);
     $r3 = @imap_search($conn, 'SINCE "' . $since . '"', SE_UID);
     @imap_errors();
     if (is_array($r3) && $r3) {
       // 从最新往前找（新邮件更可能是我们刚发的）
-      $hit = $verify(array_reverse($r3), 300);
+      $hit = $verify(array_reverse($r3), 40);
       if ($hit > 0) { return $hit; }
     }
     return 0;
@@ -282,14 +293,14 @@ function wwe_find_message($conn, $messageId, $spamFolder, $ref) {
  * 对 Gmail 来说，"Not spam / Move to inbox" 是最强的正向信号之一。
  * @return array array($ok, $msg)
  */
-function wwe_rescue_from_spam($rcpt, $messageId) {
+function wwe_rescue_from_spam($rcpt, $messageId, $token = '') {
   list($conn, $err) = wwe_connect($rcpt, 'INBOX');
   if ($conn === false) { return array(false, $err); }
   try {
     $spam = wwe_spam_folder($conn, wwe_ref($rcpt));
     if ($spam === '') { return array(false, '该账号没有垃圾邮件文件夹'); }
 
-    $found = wwe_find_message($conn, $messageId, $spam, wwe_ref($rcpt));
+    $found = wwe_find_message($conn, $messageId, $spam, wwe_ref($rcpt), $token);
     if ($found['state'] !== 'spam') {
       return array(false, $found['state'] === 'inbox' ? '邮件本来就在收件箱' : '在垃圾箱里找不到这封邮件');
     }
@@ -371,7 +382,10 @@ function wwe_check_peer_reply($conn, $sentFolder, $toEmail, $sinceDays = 30) {
   if (!is_array($uids) || empty($uids)) { return array(true, 0, ''); }
 
   $latest = '';
-  $ov = @imap_fetch_overview($conn, implode(',', array_slice(array_values($uids), 0, 100)), FT_UID);
+  // 只读**最新一封**的头就够了（UID 升序 → 最后一封最新）。
+  // 原来一次读 100 封，在 Gmail 上要两分钟 —— 而这里只需要一个时间戳。
+  $uids = array_values($uids);
+  $ov = @imap_fetch_overview($conn, (string)end($uids), FT_UID);
   if (is_array($ov)) {
     foreach ($ov as $o) {
       if (!empty($o->date)) {

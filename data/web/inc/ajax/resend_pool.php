@@ -160,9 +160,16 @@ try {
       if ((int)$stmt->fetch(PDO::FETCH_ASSOC)['c'] > 0) {
         rp_json(array('ok' => false, 'message' => '该账号仍绑定域名，请先移除域名或改用其他账号'));
       }
-      // 清理对应的 relayhosts 记录，避免遗留含旧 API Key 的孤儿行
-      $stmt = $pdo->prepare("DELETE FROM `relayhosts` WHERE `hostname` = :h AND `username` = :u");
-      $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => 'resend#' . $id));
+      // 清理对应的 relayhosts 记录，避免遗留含旧 API Key 的孤儿行。
+      // 只能按 relayhosts.id 定位 —— 所有号池账号的 SASL 用户名都是 `resend`，
+      // 用 hostname+username 去删会把别的账号那一行一起删掉。
+      $stmt = $pdo->prepare("SELECT `relayhost_id` FROM `resend_accounts` WHERE `id` = :id LIMIT 1");
+      $stmt->execute(array(':id' => $id));
+      $rhid = (int)$stmt->fetchColumn();
+      if ($rhid > 0) {
+        $stmt = $pdo->prepare("DELETE FROM `relayhosts` WHERE `id` = :id");
+        $stmt->execute(array(':id' => $rhid));
+      }
       $stmt = $pdo->prepare("DELETE FROM `resend_accounts` WHERE `id`=:id");
       $stmt->execute(array(':id' => $id));
       rp_json(array('ok' => true, 'message' => '账号及其中继记录已删除'));

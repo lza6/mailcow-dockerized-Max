@@ -166,6 +166,81 @@ if (file_exists($initDb)) {
             '$db_version 是 yyyymmdd_hhmm 形式的版本串（实际 ' . $liveHits[0] . '）'
         );
     }
+
+    // 本次要加的两个列必须在表定义里（漏了就会被 init_db 对账**删掉**）
+    $dbSrc2 = file_get_contents($initDb);
+    assert_true(strpos($dbSrc2, '"relayhost_id" =>') !== false,
+        'resend_accounts 定义里有 relayhost_id 列');
+    assert_true(strpos($dbSrc2, '"message_token" =>') !== false,
+        'warmup_messages 定义里有 message_token 列');
+}
+
+/* ------------------------------------------------------------------ *
+ * 6. 养号：投递反查锚点（token）
+ *
+ * 守的是一个**静默失效**：投递判定要拿「我们记下的标识」去收件人邮箱里
+ * 反查这封邮件落在收件箱还是垃圾箱。锚点选错的话，查询不报错、
+ * 只是永远找不到 —— 垃圾箱率恒为 0，而界面上一切正常。
+ *
+ * 三条已知走不通的路（都实测过）：
+ *   · Message-ID —— 出站走中继时中继会重写它（Resend → @send.域 / amazonses）
+ *   · HEADER 搜索 —— **PHP 的 imap_search() 自己就不支持**，请求根本不发出去
+ *   · X-GM-RAW  —— 同上，也是被 PHP 挡掉
+ * 唯一能用又快的：把唯一 token 放进 Subject，用 SUBJECT 搜。
+ * ------------------------------------------------------------------ */
+section('养号投递反查锚点');
+
+$warmupInc = $ROOT . '/data/web/inc/functions.warmup.inc.php';
+$warmupExt = $ROOT . '/data/web/inc/functions.warmup_ext.inc.php';
+assert_true(file_exists($warmupInc) && file_exists($warmupExt), '养号核心文件存在');
+
+if (file_exists($warmupInc) && file_exists($warmupExt)) {
+    require_once $warmupExt;
+    require_once $warmupInc;
+
+    $t1 = warmup_new_token();
+    $t2 = warmup_new_token();
+    assert_true((bool)preg_match('/^WU[A-Z0-9]{10}$/', $t1), 'token 形如 WU + 10 位大写字母数字（实际 ' . $t1 . '）');
+    assert_true($t1 !== $t2, '两次生成的 token 不相同');
+    // token 是对外可见的唯一键：撞了会把结果判到别的邮件头上，且完全静默
+    $seen = array();
+    for ($i = 0; $i < 500; $i++) { $seen[warmup_new_token()] = 1; }
+    assert_equals(500, count($seen), '连续生成 500 个 token 无重复');
+    // 只含安全字符：不引入需要 IMAP 转义的字符，也不会被 Subject 搜索误解
+    assert_true(strpbrk($t1, "\"'\\*%(){}<>[] ") === false, 'token 只含安全字符');
+
+    $incSrc = file_get_contents($warmupInc);
+    $extSrc = file_get_contents($warmupExt);
+
+    // 主题里必须真的带上 token，否则搜不到
+    assert_true(strpos($incSrc, '(ref %s)') !== false, '发信主题模板里带上 token');
+    assert_true(strpos($incSrc, "'token' => \$token") !== false
+             || strpos($incSrc, "'token' => \$token,") !== false,
+        'warmup_send_mail() 把 token 回传给调用方');
+
+    // 搜索条件：必须用 SUBJECT；HEADER / X-GM-RAW 是被 PHP 拒掉的死路
+    assert_true(strpos($extSrc, "'SUBJECT \"'") !== false, '按 SUBJECT 搜索 token');
+    // 注意断言的是**搜索条件字面量**（带引号），而不是裸词 ——
+    // 注释里解释"为什么不用 X-GM-RAW"时本来就会提到它。
+    assert_true(strpos($extSrc, "'X-GM-RAW") === false, '不再把 X-GM-RAW 当搜索条件（会被 PHP 拒绝）');
+    assert_true(strpos($extSrc, "'HEADER ") === false, '不再把 HEADER 当搜索条件（会被 PHP 拒绝）');
+
+    // 兜底路径的候选上限：它直接决定耗时（Gmail 上约 1.3 秒/封）。
+    // 曾经是 300 → 一本 16 封邮件要跑近一小时，check 永远跑不完。
+    assert_true(strpos($extSrc, '$verify(array_reverse($r3), 40)') !== false,
+        'Message-ID 兜底路径只读最近 40 封的头（不是 300）');
+
+    // token 是可选参数，旧调用点不能被打断
+    $rf = new ReflectionFunction('wwe_find_message');
+    assert_equals(5, $rf->getNumberOfParameters(), 'wwe_find_message 有 5 个参数');
+    assert_equals(4, $rf->getNumberOfRequiredParameters(), 'wwe_find_message 前 4 个参数必填、token 可选');
+
+    $rr = new ReflectionFunction('wwe_rescue_from_spam');
+    assert_equals(3, $rr->getNumberOfParameters(), 'wwe_rescue_from_spam 有 3 个参数（token 可选）');
+
+    // 连接层重试存在，但认证失败不重试（否则会把 Google 的限流拖更久）
+    assert_true(strpos($extSrc, 'AUTHENTICATIONFAILED') !== false,
+        'wwe_connect 能识别认证失败并停止重试');
 }
 
 /* ------------------------------------------------------------------ *

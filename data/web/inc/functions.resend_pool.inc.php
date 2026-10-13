@@ -226,28 +226,58 @@ function resend_pool_domains() {
 /**
  * 确保号池账号有一条对应的 relayhosts 记录，返回 relayhosts.id
  * 复用 mailcow 原生中继机制，使发信真正走该账号
+ *
+ * ⚠️ SASL 用户名**必须**是字面量 `resend`，不能带任何后缀。
+ *
+ * Resend 的 SMTP 认证只认「username=`resend` + password=API Key」这一种组合。
+ * 早期这里为了让每个账号各自独立，把用户名写成 `resend#<id>`，
+ * postfix 便原样把 `resend#1` 当 SASL 用户名发过去，Resend 回
+ * `535 Invalid username` —— **该账号名下的所有出站邮件全部被拒**（bounced）。
+ *
+ * 账号之间靠 relayhosts 行的 **id** 区分，不靠用户名：
+ * postfix 打开 `smtp_sender_dependent_authentication = yes` 后，
+ * `smtp_sasl_password_maps`（mysql_sasl_passwd_maps_sender_dependent.cf）
+ * 是按 `domain.relayhost = relayhosts.id` 取到唯一那一行的，
+ * 因此多行同时叫 `resend` 完全没问题。
+ * 账号 → 行的对应关系记在 `resend_accounts.relayhost_id`。
  */
 function resend_pool_ensure_relayhost($account) {
   global $pdo;
-  $id = (int)$account['id'];
+  $id  = (int)$account['id'];
   $key = (string)$account['api_key'];
-  // 关键：必须按账号 id 区分 username，否则多个账号会共用同一条
-  // relayhosts 记录、互相覆盖密码，导致「每账号独立发信」失效。
-  // mailcow 的 mysql_sasl_passwd_maps_sender_dependent.cf 取的是
-  // username/password 字段，因此 username 用 resend#<id> 即可各自独立。
-  $username = 'resend#' . $id;
-  $stmt = $pdo->prepare("SELECT `id` FROM `relayhosts` WHERE `hostname` = :h AND `username` = :u LIMIT 1");
-  $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => $username));
-  $found = $stmt->fetch(PDO::FETCH_ASSOC);
-  if ($found) {
-    // 已存在则同步密码与启用状态
-    $stmt = $pdo->prepare("UPDATE `relayhosts` SET `password` = :p, `active` = :a WHERE `id` = :id");
-    $stmt->execute(array(':p' => $key, ':a' => (int)$account['active'], ':id' => (int)$found['id']));
-    return (int)$found['id'];
+  $username = 'resend';
+
+  $stmt = $pdo->prepare("SELECT `relayhost_id` FROM `resend_accounts` WHERE `id` = :id LIMIT 1");
+  $stmt->execute(array(':id' => $id));
+  $rhid = (int)$stmt->fetchColumn();
+
+  if ($rhid > 0) {
+    $chk = $pdo->prepare("SELECT COUNT(*) FROM `relayhosts` WHERE `id` = :id");
+    $chk->execute(array(':id' => $rhid));
+    if ((int)$chk->fetchColumn() > 0) {
+      // 行还在 → 原地同步密码与启用状态。
+      // **换 Key 时走的就是这条路**：必须更新这一行，不能另起一行，
+      // 否则域名仍指向旧行、继续拿旧 Key 发信（静默失效）。
+      $stmt = $pdo->prepare("UPDATE `relayhosts` SET `hostname` = :h, `username` = :u,
+                                                       `password` = :p, `active` = :a
+                              WHERE `id` = :id");
+      $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => $username,
+                           ':p' => $key, ':a' => (int)$account['active'], ':id' => $rhid));
+      return $rhid;
+    }
+    // 行被外部删掉了 → 掉到下面重建
   }
-  $stmt = $pdo->prepare("INSERT INTO `relayhosts` (`hostname`, `username`, `password`, `active`) VALUES (:h, :u, :p, :a)");
-  $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => $username, ':p' => $key, ':a' => (int)$account['active']));
-  return (int)$pdo->lastInsertId();
+
+  $stmt = $pdo->prepare("INSERT INTO `relayhosts` (`hostname`, `username`, `password`, `active`)
+                         VALUES (:h, :u, :p, :a)");
+  $stmt->execute(array(':h' => RESEND_RELAY_HOST, ':u' => $username,
+                       ':p' => $key, ':a' => (int)$account['active']));
+  $newId = (int)$pdo->lastInsertId();
+
+  $stmt = $pdo->prepare("UPDATE `resend_accounts` SET `relayhost_id` = :r WHERE `id` = :id");
+  $stmt->execute(array(':r' => $newId, ':id' => $id));
+
+  return $newId;
 }
 
 /**

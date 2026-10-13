@@ -23,8 +23,20 @@ function init_db_schema()
      * resend_pool_settings / admin_audit_log / overview_mbox_daily / mailbox_mailstats），
      * 而库里 db_schema 一直是上游的 10102026_2200、warmup_messages 从未被建出来。
      * 因此这里恢复赋值并提升到 12102026_0100。
+     *
+     * 2026-10-13：resend_accounts 增加 `relayhost_id`（账号 → relayhosts 行的对应关系）。
+     * 起因是一个线上事故：号池账号的 SASL 用户名被写成 `resend#<id>`，
+     * 而 Resend 只认字面量 `resend`，导致这些域名的**全部出站邮件被 535 拒绝**。
+     * 详见 resend_pool_ensure_relayhost() 的注释。
+     *
+     * 2026-10-13（同日第二次）：warmup_messages 增加 `message_token`。
+     * 起因：中继会重写 Message-ID，拿本地 message_id 去收件人邮箱反查永远落空，
+     * 「垃圾箱率」因此恒为 0 且永远查不出错。详见该列定义处的注释。
+     *
+     * 两条都提升到 13102026_0200 —— 不改这里，新列在已有部署上永远加不上
+     * （init_db 在版本相同时会直接返回）。
      */
-    $db_version = "12102026_0100";
+    $db_version = "13102026_0200";
 
     $stmt = $pdo->query("SHOW TABLES LIKE 'versions'");
     $num_results = count($stmt->fetchAll(PDO::FETCH_ASSOC));
@@ -182,7 +194,8 @@ function init_db_schema()
           "active" => "TINYINT(1) NOT NULL DEFAULT '1'",
           "created" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
           "last_check" => "DATETIME(0) NULL DEFAULT NULL",
-          "check_status" => "VARCHAR(255) NOT NULL DEFAULT ''"
+          "check_status" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          "relayhost_id" => "INT NOT NULL DEFAULT '0'"
         ),
         "keys" => array(
           "primary" => array(
@@ -296,6 +309,13 @@ function init_db_schema()
           "recipient_id" => "INT NOT NULL DEFAULT '0'",
           "recipient" => "VARCHAR(255) NOT NULL",
           "message_id" => "VARCHAR(255) NOT NULL DEFAULT ''",
+          // 反查用的唯一标记（同时写进 Subject 的括号里）。
+          // 为什么不能只靠 message_id：出站走中继时，**中继会重写 Message-ID**
+          // ——实测 Resend 会把我们生成的 `<xxx@域>` 换成
+          // `<...@send.域>` / `<...@email.amazonses.com>`，于是拿本地
+          // message_id 去收件箱里找，永远找不到，投递判定恒为 unknown。
+          // Subject 则不会被中继改写，所以用它当锚点。
+          "message_token" => "VARCHAR(32) NOT NULL DEFAULT ''",
           "subject" => "VARCHAR(255) NOT NULL DEFAULT ''",
           "sent_at" => "DATETIME(0) NOT NULL DEFAULT NOW(0)",
           "send_ok" => "TINYINT(1) NOT NULL DEFAULT '1'",
