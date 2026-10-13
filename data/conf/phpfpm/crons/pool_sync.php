@@ -48,6 +48,10 @@ try {
   }
 } catch (Throwable $e) { $redis = null; }
 
+// `functions.resend_pool.inc.php` 顶部用 `$_SERVER['DOCUMENT_ROOT']` 定位 prerequisites，
+// CLI 下这个变量不存在，必须先补上，否则 require 直接失败。
+if (empty($_SERVER['DOCUMENT_ROOT'])) { $_SERVER['DOCUMENT_ROOT'] = '/web'; }
+
 require_once(__DIR__ . '/../web/inc/functions.resend_pool.inc.php');
 
 try {

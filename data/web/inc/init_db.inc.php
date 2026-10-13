@@ -1822,9 +1822,17 @@ function init_db_schema()
   }
 }
 if (php_sapi_name() == "cli") {
-  include '/web/inc/vars.inc.php';
-  include '/web/inc/functions.inc.php';
-  include '/web/inc/functions.docker.inc.php';
+  // ⚠️ 这三行**必须是 require_once，不能是 include**。
+  //    本文件通常经 prerequisites.inc.php 的 require_once 被加载，而 prerequisites
+  //    已经用 require_once 加载过 vars/functions/functions.docker。
+  //    写成 include 的话，CLI 场景下这里会把它们**再声明一遍** →
+  //        PHP Fatal error: Cannot redeclare is_valid_regex()
+  //    后果不只是"这里报错"：**任何 CLI 脚本都无法加载 prerequisites.inc.php**，
+  //    于是所有想复用共享代码的 cron 都得把逻辑复制一遍。
+  //    改成 require_once 后，已加载过就跳过，未加载则照常加载（行为不变且更安全）。
+  require_once '/web/inc/vars.inc.php';
+  require_once '/web/inc/functions.inc.php';
+  require_once '/web/inc/functions.docker.inc.php';
   // $now = new DateTime();
   // $mins = $now->getOffset() / 60;
   // $sgn = ($mins < 0 ? -1 : 1);

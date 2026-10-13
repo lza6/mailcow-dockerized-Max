@@ -279,6 +279,28 @@ function warmup_run($pdo, $force = false) {
     return $result;
   }
 
+  // ⚠️ **全局限流**：整个 run 一次最多发 1 封（跨所有计划）。
+  //
+  // 为什么必须有这一层：上一版的「错开」只限制**单个计划**自己两次发送的间隔，
+  // 但多个计划各自到点时会**在同一秒一起发**。实测踩过：15 个计划 →
+  // 14 封邮件在 22:20:01–22:20:04 这 3 秒内全部发出，
+  // 而它们**全部发给同一个收件人** —— 这正是接收方判定"批量突发"的典型特征。
+  //
+  // 加上这道闸后：cron 每 5 分钟一跑，每跑最多 1 封，
+  // 15 个计划会自然摊到一天里，而不是整点齐发。
+  if (!$force) {
+    $lastAny = 0;
+    foreach ($pdo->query("SELECT UNIX_TIMESTAMP(MAX(`sent_at`)) FROM `warmup_messages`
+                           WHERE `send_ok` = 1 AND DATE(`sent_at`) = CURDATE()")->fetchAll(PDO::FETCH_NUM) as $z) {
+      $lastAny = (int)$z[0];
+    }
+    if ($lastAny > 0 && (time() - $lastAny) < WARMUP_MIN_GAP_SEC) {
+      $wait = WARMUP_MIN_GAP_SEC - (time() - $lastAny);
+      $result['skipped'][] = 'global stagger: 距上一封 ' . (time() - $lastAny) . 's，等待 ' . $wait . 's';
+      return $result;
+    }
+  }
+
   foreach (warmup_plans($pdo, true) as $plan) {
     $result['checked']++;
 
@@ -413,6 +435,12 @@ function warmup_run($pdo, $force = false) {
         . $failAll . '/' . $totAll . ')');
       $result['paused'][] = $plan['domain'];
     }
+
+    // ⚠️ **发满 1 封就跳出整个 while 循环**。
+    // 全局限流只在 run 开头检查一次；若不在这里 break，第一个计划发完后
+    // 循环会继续处理第二个计划、再发一封 —— 多头计划叠加起来仍是一次突发。
+    // （实测踩过：15 个计划在 3 秒内发了 14 封，全部给同一个收件人。）
+    if ($sent > 0) { break; }
   }
 
   return $result;
