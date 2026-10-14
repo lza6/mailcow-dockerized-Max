@@ -19,12 +19,22 @@ function ov_host() {
 }
 
 /**
- * 域名注册时长（天）。走 RDAP，结果缓存 1 天。
+ * 域名注册时长（天）。走 RDAP，结果带三态语义缓存。
  *
  * @param bool $cacheOnly true = 只读缓存，**不发起网络请求**。
  *        页面首屏必须传 true —— 16 个域逐个 RDAP 会让首屏慢到 1.8 秒以上。
- *        只有「体检」动作才传 false。
+ *        只有「体检」动作与后台 cron 才传 false。
  * 失败返回 null（界面显示「未知」），不猜测。
+ *
+ * ⚠️ 缓存三态（这是本函数最容易被改坏的地方）：
+ *    `registered` = int   → 查到注册时间，缓存 24 小时
+ *    `registered` = false → **确定未注册**（RDAP 返回 404），缓存 1 小时
+ *    `registered` = null  → **查询失败**（超时/429/5xx），只缓存 300 秒
+ *
+ *   第三态是必须存在的。早先的实现把失败也写成 `{"registered":false}` 并缓存
+ *   24 小时，于是一次网络抖动就把「未知」**固化一整天**；而 cron 侧读回这个
+ *   false 会以为"已有值"从而不再重试 —— 两边互相污染，永远恢复不了。
+ *   「确定的未注册」与「没查成」是两件事，缓存时长必须区分。
  */
 function ov_domain_age_days($redis, $domain, $cacheOnly = false) {
   $key = 'OV_RDAP/' . $domain;
@@ -34,8 +44,15 @@ function ov_domain_age_days($redis, $domain, $cacheOnly = false) {
       if ($raw !== false && $raw !== null) {
         $d = json_decode($raw, true);
         if (is_array($d) && array_key_exists('registered', $d)) {
-          if (!$d['registered']) return null;
-          return intdiv(time() - (int)$d['registered'], 86400);
+          if ($d['registered'] === null) {
+            // 上次查询失败：**当作没有缓存**，让 cron 路径（cacheOnly=false）
+            // 立刻重试。这里绝不能直接 return null —— 那会让 cron 的
+            // "需不需要查"判定永远为假，失败就被永久固化。
+            $d = null;
+          } else {
+            if (!$d['registered']) { return null; }   // 确定未注册
+            return intdiv(time() - (int)$d['registered'], 86400);
+          }
         }
       }
     } catch (Exception $e) {}
@@ -47,7 +64,8 @@ function ov_domain_age_days($redis, $domain, $cacheOnly = false) {
                  'net' => 'https://rdap.verisign.com/net/v1/domain/');
   $url = (isset($bases[$tld]) ? $bases[$tld] : 'https://rdap.org/domain/') . rawurlencode($domain);
 
-  $registered = false;
+  $registered = null;   // 三态：int / false / null
+  $err        = '';
   $ch = curl_init($url);
   curl_setopt_array($ch, array(
     CURLOPT_RETURNTRANSFER => true,
@@ -56,25 +74,141 @@ function ov_domain_age_days($redis, $domain, $cacheOnly = false) {
     CURLOPT_TIMEOUT        => 12,
     CURLOPT_CONNECTTIMEOUT => 6,
     CURLOPT_USERAGENT      => 'mailcow-max/1.0',
+    CURLOPT_HTTPHEADER     => array('Accept: application/rdap+json'),
   ));
   $body = curl_exec($ch);
+  $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  $cerr = curl_error($ch);
   curl_close($ch);
-  if ($body) {
-    $j = json_decode($body, true);
+
+  if ($body === false) {
+    $err = 'curl_error=' . $cerr;                  // 网络层失败
+  } elseif ($code === 404) {
+    $registered = false;                            // 确定未注册（不是故障）
+  } elseif ($code !== 200) {
+    $err = 'HTTP ' . $code;                         // 429/5xx：上游故障，不能当结论
+  } else {
+    $j = json_decode((string)$body, true);
     if (is_array($j) && !empty($j['events'])) {
       foreach ($j['events'] as $ev) {
         if (isset($ev['eventAction']) && $ev['eventAction'] === 'registration' && !empty($ev['eventDate'])) {
           $ts = strtotime($ev['eventDate']);
-          if ($ts) { $registered = $ts; }
+          if ($ts) { $registered = (int)$ts; }
           break;
         }
       }
     }
+    if ($registered === null) { $err = 'HTTP 200 but no registration event'; }
   }
+
   if ($redis) {
-    try { $redis->setex($key, 86400, json_encode(array('registered' => $registered))); } catch (Exception $e) {}
+    try {
+      if ($err !== '') {
+        $redis->setex($key, 300, json_encode(array('registered' => null, 'error' => $err, 'at' => time())));
+        error_log('overview: RDAP 查询失败 ' . $domain . ' — ' . $err);
+      } elseif ($registered === false) {
+        $redis->setex($key, 3600, json_encode(array('registered' => false, 'at' => time())));
+      } else {
+        $redis->setex($key, 86400, json_encode(array('registered' => $registered, 'at' => time())));
+      }
+    } catch (Exception $e) {}
   }
   return $registered ? intdiv(time() - $registered, 86400) : null;
+}
+
+/* ================================================================== *
+ * 待体检队列
+ *
+ * 解决的问题：`OV_CHECK/<域>` 缓存为空时，页面只能显示「未检测」，
+ * 而后台 cron 要等下一个 30 分钟的 tick 才会填上 —— 用户看到的就是一个
+ * 静止的、没有解释的空窗。
+ *
+ * 做法：首屏发现缓存为空的域 → 排进队列（**纯 redis 操作，零网络**）；
+ * 后台 cron 优先处理队列里的域，队列空则立即退出（稳态成本≈0）。
+ * ================================================================== */
+
+/** 待体检队列（zset：member=域名，score=入队时间戳） */
+if (!defined('OV_PENDING_KEY')) { define('OV_PENDING_KEY', 'OV_CHECK_PENDING'); }
+/** 队列整体存活时间：超时说明 cron 有问题，别让僵尸数据堆积 */
+if (!defined('OV_PENDING_TTL')) { define('OV_PENDING_TTL', 7200); }
+
+/**
+ * 把「缓存为空的域」排进待体检队列。
+ *
+ * ⚠️ 本函数在**首屏路径**上被调用，只做纯内存 redis 操作，
+ *    **绝不发起任何 DNS/RDAP 请求**（见文件头性能原则）。
+ *    改动本函数时务必守住这条 —— 首屏加一次网络 I/O，16 个域就是数十秒。
+ *
+ * 用 zset 而非 set：需按入队时间排序，让 cron 先处理排得最久的域，
+ * 避免某些域被后来的域反复插队饿死。
+ *
+ * @return int 新增入队的域数
+ */
+function ov_mark_pending($redis, array $domains) {
+  if (!$redis || !$domains) { return 0; }
+  try {
+    $now = time();
+    $n = 0;
+    foreach ($domains as $d) {
+      // zAdd 返回**新增**成员数：已存在返回 0。
+      // 不能无条件覆盖 score —— 否则每开一次页面就把该域推到最后，
+      // 队列在"反复刷新"下退化成 LIFO，老域永远轮不上。
+      $added = $redis->zAdd(OV_PENDING_KEY, $now, (string)$d);
+      if ($added) { $n++; }
+    }
+    if ($n > 0) { $redis->expire(OV_PENDING_KEY, OV_PENDING_TTL); }
+    return $n;
+  } catch (Exception $e) {
+    error_log('overview: 入队待体检失败: ' . $e->getMessage());
+    return 0;
+  }
+}
+
+/**
+ * 取出待处理的域（按入队时间从早到晚），并**立即移除**。
+ *
+ * 「取出即移除」的取舍：worker 被杀时该域会留在队列外，但下一轮
+ * healthcheck 会因缓存仍为空而重新入队；反过来「处理完才移除」会让
+ * 该域永远卡在队头且每轮被重复处理 —— 后者更糟。
+ *
+ * @return array 域名列表
+ */
+function ov_take_pending($redis, $limit = 50) {
+  if (!$redis) { return array(); }
+  try {
+    $items = $redis->zRange(OV_PENDING_KEY, 0, max(0, (int)$limit - 1));
+    if (!is_array($items) || !$items) { return array(); }
+    foreach ($items as $d) { $redis->zRem(OV_PENDING_KEY, (string)$d); }
+    return $items;
+  } catch (Exception $e) {
+    error_log('overview: 取出待体检队列失败: ' . $e->getMessage());
+    return array();
+  }
+}
+
+/**
+ * 后台体检任务的健康度（供界面说明"为什么一直显示未检测"）。
+ *
+ * @return array array('enabled','last_full_at','last_full_age','pending','interval','job')
+ */
+function ov_healthcheck_info($redis) {
+  $o = array('enabled' => false, 'last_full_at' => '', 'last_full_age' => null,
+             'pending' => 0, 'interval' => '每 30 分钟', 'job' => 'phpfpm_healthcheck');
+  if (!$redis) { return $o; }
+  try {
+    $t = (int)$redis->get('OV_CHECK_LAST_FULL');
+    $p = (int)$redis->zCard(OV_PENDING_KEY);
+    // enabled 只在**两个调用都成功之后**才置 true。
+    // 若在 get 之前就置 true，redis 半死不活（连得上但命令报错）时
+    // 界面会显示"一切正常"，把真正的问题藏起来。
+    $o['enabled'] = true;
+    if ($t > 0) {
+      $o['last_full_at']  = date('Y-m-d H:i:s', $t);
+      $o['last_full_age'] = time() - $t;
+    }
+    $o['pending'] = $p;
+  } catch (Exception $e) {}
+  return $o;
 }
 
 /**
@@ -482,7 +616,8 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
   } catch (Exception $e) {}
 
   // ---- 域名健康缓存 ----
-  $out = array();
+  $out     = array();
+  $pending = array();
   foreach ($domains as $d) {
     $c = null;
     if ($redis) {
@@ -498,6 +633,25 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       if (empty($c['dkim_ok']))  $bad++;
       if (empty($c['dmarc_ok'])) $warn++;
     }
+
+    // ---- checked 三态（前端 overview.js 的 pendingBadge/notCheckedBadge 与此一一对应）----
+    //
+    //   'ready'   有缓存值，mx_ok/spf_ok/... 可信
+    //   'pending' 无缓存但已排进 OV_CHECK_PENDING，cron 下轮会填
+    //   'none'    redis 不可用 —— 需人工介入（查 ofelia 容器）
+    //
+    // 为什么不做成布尔：判定「值对不对(ready)」与「系统有没有在干活(pending)」
+    // 是两个独立事实。合成一个布尔后，前端被迫用同一个「未检测」同时表达
+    // "正在查"和"坏了" —— 用户看到的就是一个静止的、没有解释的空窗。
+    if (is_array($c)) {
+      $checked = 'ready';
+    } elseif ($redis) {
+      $checked   = 'pending';
+      $pending[] = $d['domain'];
+    } else {
+      $checked = 'none';
+    }
+
     $out[] = array(
       'domain'     => $d['domain'],
       'active'     => (int)$d['active'],
@@ -508,7 +662,7 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       'mailboxes'  => isset($mboxCnt[$d['domain']]) ? $mboxCnt[$d['domain']] : 0,
       'messages'   => isset($msgByDom[$d['domain']]) ? $msgByDom[$d['domain']] : 0,
       'age_days'   => ov_domain_age_days($redis, $d['domain'], $ageCacheOnly),
-      'checked'    => is_array($c),
+      'checked'    => $checked,
       'checked_at' => is_array($c) ? (string)$c['checked_at'] : '',
       'mx'         => is_array($c) && isset($c['mx']) ? $c['mx'] : array(),
       'mx_ok'      => is_array($c) ? (bool)$c['mx_ok'] : null,
@@ -520,6 +674,10 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       'warmup'     => isset($wu[$d['domain']]) ? $wu[$d['domain']] : null,
     );
   }
+
+  // 入队放在循环外：循环内逐域 zAdd 会产生 16 次 redis 往返。
+  // ov_mark_pending 只做内存操作，不引入任何网络 I/O（见其注释）。
+  if ($pending) { ov_mark_pending($redis, $pending); }
 
   // ---- 可选的中继主机列表（供邮箱级覆盖用）----
   // mailcow 原生支持 mailbox.attributes.relayhost；这里只是把可选项列出来。
@@ -644,5 +802,13 @@ function overview_build($pdo, $redis, $ageCacheOnly = true) {
       'today_new' => $totalNew,
     ),
     'server_time' => date('Y-m-d H:i:s'),
+    // 服务器时区：页面上的所有时刻（尤其「下一封」与发送窗口）都是**服务器时区**。
+    // 不标注的话，人在北京看到「09:07」会当成北京时间，而服务器可能跑在纽约 ——
+    // 于是"为什么到点没发"这类困惑必然发生。标注出来，歧义就没了。
+    'server_tz'        => date('T'),
+    'server_tz_offset' => date('P'),
+    // 后台体检任务的健康度：界面靠它说明"为什么一直显示未检测"。
+    // 没有这个信息，用户只能干等；有了才知道该去查 ofelia 容器。
+    'healthcheck' => ov_healthcheck_info($redis),
   );
 }

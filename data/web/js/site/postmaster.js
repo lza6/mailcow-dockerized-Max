@@ -334,6 +334,76 @@ $(document).ready(function () {
       }).fail(function () { notice('保存失败', true); });
   });
 
+  /* ---------------- 投递与风控白皮书 ---------------- *
+   *
+   * 正文以 Markdown 存在模板里的 <script type="text/markdown" id="pm_doc_md">。
+   * 渲染用 mailcow 自带的 markdown-it（window.markdownit，dashboard 页也用它渲染
+   * release notes）。**不引入新依赖** —— 仓库里已经有这个库。
+   *
+   * 三层降级（都要有，否则用户会看到一片空白还不知道为什么）：
+   *   1. markdown-it 可用 → 正常渲染
+   *   2. 不可用（精简构建/插件没加载）→ 用 <pre> 原样显示，至少能读
+   *   3. 连正文都没取到 → 明确报错，不静默留白
+   */
+  function renderDoc(anchor) {
+    var $body = $('#pm_doc_body');
+    var raw = '';
+    var el = window.document.getElementById('pm_doc_md');
+    if (el) { raw = el.textContent || ''; }
+    if (!raw.trim()) {
+      $body.html('<div class="alert alert-danger mb-0">白皮书正文未能加载（模板里的 ' +
+                 '<code>#pm_doc_md</code> 为空）。请检查 <code>tab-config-postmaster.twig</code> ' +
+                 '是否被正确部署。</div>');
+      return;
+    }
+    var html = null;
+    try {
+      if (typeof window.markdownit === 'function') {
+        html = window.markdownit({ html: false, linkify: true, breaks: false }).render(raw);
+      }
+    } catch (e) { html = null; }
+    if (html === null) {
+      // markdown-it 不可用：原样显示，别让用户面对空白
+      $body.html('<div class="alert alert-warning py-2 small">' +
+                 'Markdown 渲染库（<code>markdown-it</code>）未加载，以下为纯文本原文。</div>' +
+                 '<pre class="small" style="white-space:pre-wrap">' + esc(raw) + '</pre>');
+    } else {
+      $body.html(html);
+    }
+    // 滚动到指定锚点（排障手册入口用）
+    if (anchor) {
+      var $h = $body.find('h2').filter(function () {
+        return ($(this).text() || '').indexOf(anchor) !== -1;
+      }).first();
+      if ($h.length) {
+        $body.scrollTop($h.position().top + $body.scrollTop() - 8);
+      }
+    } else {
+      $body.scrollTop(0);
+    }
+  }
+
+  function openDoc(anchor) {
+    if (!window.bootstrap || !window.bootstrap.Modal) {
+      // Bootstrap 不可用时退化为新窗口打开原文，至少内容可及
+      var el = window.document.getElementById('pm_doc_md');
+      var w = window.open('', '_blank');
+      if (w && el) {
+        w.document.write('<pre style="white-space:pre-wrap;font-family:sans-serif">' +
+                         esc(el.textContent || '') + '</pre>');
+        w.document.close();
+      }
+      return;
+    }
+    renderDoc(anchor);
+    window.bootstrap.Modal.getOrCreateInstance(
+      window.document.getElementById('pm_doc_modal')).show();
+  }
+
+  $('#pm_open_doc').on('click', function () { openDoc(null); });
+  // 「直接看排障手册」：同一个弹窗，打开后滚到第五章
+  $('#pm_open_doc_trouble').on('click', function () { openDoc('五、'); });
+
   /* ---------------- 启动 ---------------- */
   // OAuth 回调跳回来时会带 ?pm=ok|err&pm_msg=…，读出来给用户看，然后把参数从地址栏清掉
   // （不清的话用户刷新页面会重复看到同一条旧消息，分不清是新结果还是上次的）。

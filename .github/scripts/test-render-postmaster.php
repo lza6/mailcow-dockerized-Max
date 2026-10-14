@@ -73,6 +73,11 @@ $jsSrc = (string)file_get_contents($JS);
 // JS 里所有 $('#xxx') 引用
 preg_match_all("/\\\$\('#([A-Za-z0-9_]+)'\)/", $jsSrc, $m);
 $jsIds = array_values(array_unique($m[1]));
+// 也要算上 getElementById('xxx')。
+// 用原生 DOM API 取元素同样算"JS 引用了它"；只认 $('#id') 会把这些
+// 误判成"孤立控件"，逼着人为了迎合测试去改写法 —— 本末倒置。
+preg_match_all("/getElementById\('([A-Za-z0-9_]+)'\)/", $jsSrc, $m0);
+$jsIds = array_values(array_unique(array_merge($jsIds, $m0[1])));
 assert_true(count($jsIds) > 10, 'JS 里抽到足够多的 id 引用（' . count($jsIds) . ' 个）');
 
 $missing = array();
@@ -83,8 +88,9 @@ assert_true(empty($missing),
     'JS 引用的每个 id 都出现在渲染结果里（缺：' . implode(', ', $missing) . '）');
 
 // 反向：模板里声明了 id，但 JS 从不引用 —— 多半是改了一边忘了另一边。
-// 容器类 id（只做分组/锚点）在白名单里。
-$allowNoJs = array('tab-config-postmaster', 'collapse-tab-postmaster', 'pm_oauth_card');
+// 容器类 id（只做分组/锚点/视觉分块）在白名单里。
+$allowNoJs = array('tab-config-postmaster', 'collapse-tab-postmaster',
+                   'pm_oauth_card', 'pm_doc_card');
 preg_match_all('/id="([A-Za-z0-9_]+)"/', $html, $m2);
 $tplIds = array_values(array_unique($m2[1]));
 $orphan = array();
@@ -145,6 +151,51 @@ foreach ($need as $needle => $why) {
 // 排错表必须真的有多行（不是标题党）
 $rows = preg_match_all('#<tr>\s*<td>#', $html);
 assert_true($rows >= 7, '排错表至少有 7 条具体条目（实际 ' . $rows . '）');
+
+/* ---------------- 4b) 投递与风控白皮书（内嵌 + 可渲染） ---------------- */
+// 入口按钮必须显眼地存在（用户明确要求"按钮放显眼的地方"）
+assert_true(strpos($html, 'id="pm_open_doc"') !== false, '有「打开白皮书」按钮');
+assert_true(strpos($html, 'id="pm_open_doc_trouble"') !== false, '有「直接看排障手册」快捷入口');
+assert_true(strpos($html, 'id="pm_doc_modal"') !== false, '白皮书弹窗容器存在');
+assert_true(strpos($html, 'id="pm_doc_body"') !== false, '弹窗正文容器存在');
+
+// 正文必须以 markdown 形式内嵌（否则弹窗打开是空的）
+assert_true(preg_match('#<script type="text/markdown" id="pm_doc_md">(.*?)</script>#s', $html, $dm) === 1,
+    '白皮书正文以 <script type="text/markdown" id="pm_doc_md"> 内嵌');
+$doc = isset($dm[1]) ? $dm[1] : '';
+
+// 小白最需要的几节必须真的在（防"标题党式"空壳）
+foreach (array('为什么邮件会进垃圾箱', '我们做了什么', '实测', '怎么查', '日常维护', '术语表') as $need) {
+    assert_true(strpos($doc, $need) !== false, "白皮书正文含「{$need}」章节");
+}
+// 实测证据必须是真实数据，不是"效果很好"这类空话
+assert_true(strpos($doc, 'dkim=pass') !== false && strpos($doc, 'spf=pass') !== false,
+    '白皮书引用了 Gmail 返回的认证头原文（实测证据，不是自说自话）');
+assert_true(strpos($doc, 'Port25') !== false || strpos($doc, 'port25') !== false,
+    '白皮书引用了第三方独立验证器（Port25）的复核结果');
+// 用户特别要求的"后期维护"三件套
+assert_true(strpos($doc, '养号什么时候可以停') !== false || strpos($doc, '什么时候可以停') !== false,
+    '白皮书含「养号什么时候可以停」');
+assert_true(strpos($doc, '怎么找 AI 帮忙') !== false || strpos($doc, '找 AI') !== false,
+    '白皮书含「怎么找 AI 帮忙」');
+// 安全红线：必须明确告诉用户不能把密钥给 AI
+assert_true(strpos($doc, '绝对不要给 AI') !== false || strpos($doc, '不要给 AI') !== false,
+    '白皮书明确了"不能给 AI 什么"（安全红线）');
+
+// 不能泄露任何真实密钥形态
+assert_true(preg_match('/re_[A-Za-z0-9]{16,}/', $doc) !== 0 ? false : true,
+    '白皮书正文不含真实 API Key 形态（re_ 开头长串）');
+assert_true(preg_match('/cfat_[A-Za-z0-9]{16,}/', $doc) !== 0 ? false : true,
+    '白皮书正文不含真实 Cloudflare Token 形态');
+
+// 篇幅下限：太短说明内容被截断了
+assert_true(mb_strlen($doc) > 3000, '白皮书正文长度合理（实际 ' . mb_strlen($doc) . ' 字符）');
+
+// ⚠️ Twig 定界符绝不能在正文里出现 —— 那会让模板直接抛 SyntaxError。
+// （本次就是因为这条踩过一次：写在 HTML 注释里的说明自己带了定界符。）
+$docNoCode = preg_replace('#<code>.*?</code>#s', '', $doc);
+assert_true(strpos($docNoCode, '{{') === false && strpos($docNoCode, '{%') === false,
+    '白皮书正文不含 Twig 定界符（否则模板渲染会直接报错）');
 
 /* ---------------- 5) 纯函数库能被独立加载 ---------------- */
 require_once $LIB;

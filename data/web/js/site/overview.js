@@ -47,6 +47,30 @@ $(document).ready(function () {
     return ok ? '<span class="badge bg-success">' + esc(label) + '</span>'
               : '<span class="badge bg-danger">' + esc(label) + '</span>';
   }
+
+  /* ------------------------------------------------------------------ *
+   * checked 三态渲染
+   *
+   * 后端契约（inc/functions.overview.inc.php → overview_build）：
+   *   'ready'   有缓存值 → 正常徽章
+   *   'pending' 已排进 OV_CHECK_PENDING，后台下一轮会填 → 「检测中…」
+   *   'none'    redis 不可用 → 「未检测」并提示查 ofelia
+   *
+   * 为什么不用布尔：早先 `!d.checked` 把"正在查"和"坏了"混成同一个
+   * 「未检测」，用户看到的就是一个静止的、没有解释的空窗 ——
+   * 那正是本次要消灭的东西。
+   * ------------------------------------------------------------------ */
+  function isCheckedReady(d) { return d.checked === 'ready'; }
+  function pendingBadge() {
+    return '<span class="badge bg-info text-dark">' +
+             '<span class="spinner-border spinner-border-sm me-1" style="width:.6rem;height:.6rem" ' +
+               'role="status" aria-hidden="true"></span>检测中…</span>' +
+           '<div><small class="text-muted">后台任务将在 30 分钟内完成</small></div>';
+  }
+  function notCheckedBadge() {
+    return '<span class="badge bg-secondary">未检测</span>' +
+           '<div><small class="text-muted">请检查 ofelia 容器</small></div>';
+  }
   /* ------------------------------------------------------------------ *
    * ⚠️ 为什么需要一个 body() 包装，而不是直接 $('#ov_xxx_body')
    *
@@ -143,13 +167,47 @@ $(document).ready(function () {
     $('#ov_stat_pool_left_sub').text('已绑 ' + (r.used || 0) + ' / 容量 ' + (r.capacity || 0));
 
     // 数据来源说明 —— 每个数字都要能说清"从哪来"，否则无法判断它可不可信
+    // 数据来源说明 —— 每个数字都要能说清"从哪来"，否则无法判断它可不可信。
+    //
+    // 三件事必须在界面上说清楚（都来自真实反馈）：
+    //   1. 这些缓存**是后台自动刷新的**（给出 cron 名，管理员才能去排查）
+    //   2. **上次完整体检时间** —— 没有它，"数据是旧的还是坏的"无法区分
+    //   3. 长期未检测时**该去查什么**（ofelia 容器），而不是让用户干等
+    var hc = d.healthcheck || {};
+    var hcHtml;
+    if (hc.enabled === false) {
+      hcHtml = '<span class="text-danger fw-bold">无法读取后台体检状态（redis 连接异常）</span>';
+    } else if (hc.last_full_age === null || hc.last_full_age === undefined) {
+      hcHtml = '<span class="text-warning">尚未执行过完整体检</span>';
+    } else {
+      var age = Number(hc.last_full_age);
+      var ageTxt = age < 60 ? '不到 1 分钟前'
+                 : (age < 3600 ? (Math.round(age / 60) + ' 分钟前')
+                               : (Math.round(age / 3600) + ' 小时前'));
+      hcHtml = '完整体检 <b>' + esc(hc.last_full_at) + '</b>（' + esc(ageTxt) + '）';
+      // 超过 2 个周期（60 分钟）没跑成 → 任务很可能已停
+      if (age > 3600) {
+        hcHtml += ' <span class="text-danger fw-bold">已超过 2 个周期，请检查 ofelia 容器</span>';
+      }
+    }
+    if ((hc.pending || 0) > 0) {
+      hcHtml += ' · 待体检 <b>' + (hc.pending | 0) + '</b> 个域';
+    }
+
     $('#ov_data_sources').html(
       '<b>数据来源</b>：' +
       '域名/邮箱/邮件数 — 本地数据库（<code>domain</code> / <code>mailbox</code> / <code>quota2</code>，不调 doveadm 所以快）；' +
-      '注册时长 — RDAP（实测最快的根域注册局接口）；' +
-      'MX / SPF / DKIM / DMARC — 由「体检」动作实时 <code>dns_get_record()</code> 查询后写缓存 1 小时，页面只读缓存（所以首屏不发起 DNS）；' +
+      '注册时长 — RDAP（实测最快的根域注册局接口），成功缓存 24 小时、失败仅缓存 5 分钟；' +
+      'MX / SPF / DKIM / DMARC — 由后台任务 <code>' + esc(hc.job || 'phpfpm_healthcheck') + '</code> ' +
+        '<b>' + esc(hc.interval || '每 30 分钟') + '</b>自动刷新并写缓存' +
+        '（cron 定义见 <code>docker-compose.yml</code> 的 ofelia 标签），' +
+        '页面只读缓存、<b>首屏绝不发起 DNS 查询</b>；新域名或缓存过期的域会在打开页面时自动排队，由后台补齐（状态列显示「检测中…」）；' +
       '养号进箱率/垃圾箱率 — 用收件账号的 IMAP 到它自己的收件箱与垃圾箱里按 <code>Message-ID</code> 反查得出；' +
-      '号池额度 — 本地号池配置（<code>resend_accounts.daily_quota</code>），非 Resend 官方实时余额。');
+      '号池额度 — 本地号池配置（<code>resend_accounts.daily_quota</code>），非 Resend 官方实时余额。' +
+      '<div class="mt-1 text-muted"><b>上次检测</b>：' + hcHtml +
+        ' · 若某个域长期显示「未检测」：先确认 <code>' + esc(hc.job || 'phpfpm_healthcheck') + '</code> 是否在跑 → ' +
+        '执行 <code>docker ps | grep ofelia</code> 确认 ofelia 容器存活 → ' +
+        '再看 <code>docker logs php-fpm-mailcow</code> 里有无 <code>[healthcheck]</code> 报错。</div>');
   }
 
   function renderDomains(rows) {
@@ -159,18 +217,21 @@ $(document).ready(function () {
     }
     var h = '';
     rows.forEach(function (d) {
-      var mxCell;
-      if (!d.checked) {
-        mxCell = '<span class="badge bg-secondary">未检测</span>';
+      var mxCell, auth;
+      if (!isCheckedReady(d)) {
+        // 非 ready：MX 与认证两列都只显示状态，**不显示"指向别处"** ——
+        // 没有数据时的红色徽章是在报告一个**假故障**。
+        var st = (d.checked === 'pending') ? pendingBadge() : notCheckedBadge();
+        mxCell = st;
+        auth   = st;
       } else if (d.mx_ok) {
         mxCell = '<span class="badge bg-success">指向本机</span>';
+        auth   = badge(d.spf_ok, 'SPF') + ' ' + badge(d.dkim_ok, 'DKIM') + ' ' + badge(d.dmarc_ok, 'DMARC');
       } else {
         mxCell = '<span class="badge bg-danger">指向别处</span>' +
                  '<div><small class="text-danger">' + esc((d.mx || []).join(', ') || '(无 MX)') + '</small></div>';
+        auth   = badge(d.spf_ok, 'SPF') + ' ' + badge(d.dkim_ok, 'DKIM') + ' ' + badge(d.dmarc_ok, 'DMARC');
       }
-
-      var auth = !d.checked ? '<span class="badge bg-secondary">未检测</span>'
-        : badge(d.spf_ok, 'SPF') + ' ' + badge(d.dkim_ok, 'DKIM') + ' ' + badge(d.dmarc_ok, 'DMARC');
 
       var wu = '<span class="text-muted">—</span>';
       if (d.warmup) {
@@ -186,7 +247,12 @@ $(document).ready(function () {
       if (parseInt(d.active, 10) !== 1) { name += ' <span class="badge bg-secondary">停用</span>'; }
 
       h += '<tr>' +
-        '<td>' + name + (d.checked ? '<div><small class="text-muted">检测 ' + esc(d.checked_at) + '</small></div>' : '') + '</td>' +
+        '<td>' + name +
+          (isCheckedReady(d)
+             ? '<div><small class="text-muted">检测 ' + esc(d.checked_at) + '</small></div>'
+             : (d.checked === 'pending'
+                  ? '<div><small class="text-muted">排队中…</small></div>'
+                  : '')) + '</td>' +
         '<td>' + fmtAge(d.age_days) + '</td>' +
         '<td>' + mxCell + '</td>' +
         '<td>' + auth + '</td>' +
@@ -265,6 +331,9 @@ $(document).ready(function () {
   var WU_STATE = null;
   var RELAYHOSTS = [];
   var DOMAIN_RELAY = {};
+  // 服务器时区缩写（如 EDT / CST）。页面上所有时刻都按它显示，
+  // 必须让用户看见，否则跨时区阅读时必然误判。
+  var SRV_TZ = '';
 
   function keyCell(id, masked, len) {
     if (revealed['resend:' + id]) {
@@ -355,8 +424,13 @@ $(document).ready(function () {
     $('#ov_warmup_card').show();
 
     var st = w.stats || {};
+    // ⚠️ 必须标出时区。这些时刻都是**服务器时区**的，而操作者可能在别的时区
+    // （本项目实测：服务器跑 America/New_York，人在北京）。
+    // 不标时区的话，看到「09:07 待发送」会以为到点了为什么没发 ——
+    // 实际那一刻还没到（纽约 09:07 = 北京 21:07）。歧义全靠这一行消除。
+    var tzl = SRV_TZ ? ('　（以下时刻均为服务器时区 ' + SRV_TZ + '）') : '';
     $('#ov_wu_rule').text('发送窗口 ' + w.window + ' · 单次最多 ' + w.max_per_run +
-                          ' 封 · 全局每日上限 ' + w.global_cap + ' 封');
+                          ' 封 · 全局每日上限 ' + w.global_cap + ' 封' + tzl);
     $('#ov_wu_today').text(w.sent_today);
     $('#ov_wu_cap').text(w.global_cap);
     $('#ov_wu_sent').text(w.sent_total);
@@ -420,7 +494,9 @@ $(document).ready(function () {
                : (p.next_state === 'pending' ? 'text-success' : 'text-muted');
         var nt = { due: '已到点，等待执行', pending: '待发送',
                    today_done: '今日配额已用完', expired: '已到期', paused: '已暂停' }[p.next_state] || p.next_state;
-        next = '<span class="' + nc + '">' + esc(p.next_at) + '</span>' +
+        next = '<span class="' + nc + '">' + esc(p.next_at) +
+               (SRV_TZ ? ' <small class="text-muted">' + esc(SRV_TZ) + '</small>' : '') +
+               '</span>' +
                '<div><small class="text-muted">' + esc(nt) + '</small></div>';
       }
       h += '<tr>' +
@@ -577,9 +653,76 @@ $(document).ready(function () {
     if (keep && $s.find('option[value="' + keep.replace(/"/g, '\\"') + '"]').length) { $s.val(keep); }
   }
 
+  /* ------------------------------------------------------------------ *
+   * pending 轮询
+   *
+   * 上限是**硬约束**（不是"通常很快所以不设上限"）：
+   *   · 最多 OV_POLL_MAX 次 × OV_POLL_MS → 总时长 ≈60 秒
+   *   · 每次只发一次 $.getJSON，前一次未回来就跳过本轮（不叠加）
+   *   · 有 pending 才轮询；pending 清零立即停止
+   *   · 页面不可见时暂停且不计次
+   *
+   * 为什么必须有上限：后台体检周期是 30 分钟，而轮询总长只有 1 分钟，
+   * 意味着轮询**经常**会耗尽次数而 pending 仍在。这是**预期行为** ——
+   * 此时降级为静态文案「后台任务将在 30 分钟内完成」+「刷新」按钮，
+   * 而不是让浏览器永远发请求（那会同时打爆服务端与用户电池）。
+   *
+   * 换句话说：轮询只负责**秒级收敛**（覆盖"刚点完体检"、以及"打开页面时
+   * 上一轮后台结果刚好落地"），分钟级收敛由用户刷新页面承担。
+   * 想靠轮询等到后台结果需要 180 次，那是无限轮询的伪装。
+   * ------------------------------------------------------------------ */
+  var OV_POLL_MS  = 10000;
+  var OV_POLL_MAX = 6;
+  var pollTimer = null;
+  var pollLeft  = 0;
+  var pollActive = false;
+
+  function hasPending(d) {
+    return !!(d && d.domains && d.domains.some(function (x) { return x.checked === 'pending'; }));
+  }
+  function stopPoll() {
+    pollActive = false;
+    if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = null; }
+    pollLeft = 0;
+  }
+  function startPoll() {
+    // ⚠️ **幂等**：已经在轮询时直接返回，**不得重置预算**。
+    //
+    // 每轮轮询的结果都会走 apply()，而 apply() 又会调 startPoll()。
+    // 若这里无条件 `pollLeft = OV_POLL_MAX`，预算就被无限续期 ——
+    // 上限形同虚设，浏览器会一直发请求（打爆服务端 + 耗光用户电池）。
+    // 这个 bug 被 test-js-overview.mjs 的"轮询次数必须恰为上限"断言抓到过。
+    if (pollActive) { return; }
+    pollActive = true;
+    pollLeft = OV_POLL_MAX;
+    pollTick();
+  }
+  function pollTick() {
+    if (pollLeft <= 0) { stopPoll(); return; }   // 上限到 → 静默降级
+    if (document.hidden) {                        // 不可见 → 暂停，不计次
+      pollTimer = window.setTimeout(pollTick, OV_POLL_MS);
+      return;
+    }
+    pollLeft--;
+    pollTimer = window.setTimeout(function () {
+      pollTimer = null;
+      $.getJSON(API, { action: 'overview' })
+        .done(function (d) {
+          apply(d);
+          if (hasPending(d)) { pollTick(); }      // 还有 pending → 继续（受上限约束）
+        })
+        .fail(function () {
+          // 轮询失败**不弹错误提示**：用户没做任何操作，弹窗是噪音。
+          stopPoll();
+        });
+    }, OV_POLL_MS);
+  }
+  $(window).on('pagehide', stopPoll);
+
   function apply(d) {
     if (!d || !d.ok) { notice((d && d.message) || '加载失败', true); return; }
     updateCsrf(d);
+    SRV_TZ = d.server_tz || '';   // 必须在 renderWarmup 之前设好
     renderStats(d);
     RELAYHOSTS = d.relayhosts || [];
     DOMAIN_RELAY = {};
@@ -604,6 +747,11 @@ $(document).ready(function () {
     }).map(function (m) {
       return { v: m.username, t: m.username };
     }));
+
+    // pending 轮询的启停由**数据**驱动，不由调用方驱动 —— 这样无论数据
+    // 来自首屏内联、点刷新、还是点体检后的 load()，行为都一致，
+    // 不会出现"某条路径忘了启轮询"。
+    if (hasPending(d)) { startPoll(); } else { stopPoll(); }
   }
 
   function load() {

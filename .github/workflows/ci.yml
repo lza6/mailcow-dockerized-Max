@@ -140,6 +140,13 @@ jobs:
       - name: Google Postmaster 标签页渲染 + 模板↔JS 契约测试
         run: php .github/scripts/test-render-postmaster.php
 
+      # 域名总览的「待体检队列」与 RDAP 三态。
+      # 重点守的是「首屏绝不发起网络 I/O」——源码级断言队列函数体内
+      # 不含 curl_/dns_get_record；以及"失败不能被当成未注册"这个曾经
+      # 把「未知」固化 24 小时的坑。
+      - name: 域名总览队列与 RDAP 三态测试（离线，假 redis 桩）
+        run: php .github/scripts/test-overview-pending.php
+
       # 这一层是前两层的空档：PHP 测试只证明"数算对了"，
       # 渲染契约测试只证明"id 对上了"，都没证明"界面上显示成对的字"。
       # 用真实 jsdom + jQuery 把页面跑起来、喂数据、读回 DOM 文本。
@@ -148,6 +155,13 @@ jobs:
 
       - name: Google Postmaster 后台脚本 DOM 行为测试（jsdom 真实渲染）
         run: node .github/scripts/test-js-postmaster.mjs
+        env:
+          NODE_PATH: ${{ github.workspace }}/.github/scripts/js-harness/node_modules
+
+      # 含一条关键断言：pending 轮询次数必须**恰为上限**。
+      # 曾经因为 apply() 每轮都重置预算导致无限轮询 —— 这条能抓住。
+      - name: 域名总览 DOM 行为测试（jsdom 真实渲染 + 轮询上限断言）
+        run: node .github/scripts/test-js-overview.mjs
         env:
           NODE_PATH: ${{ github.workspace }}/.github/scripts/js-harness/node_modules
 

@@ -79,6 +79,12 @@
 | R44 | 凭据保管箱离线可测 | `.github/scripts/test-secretbox.php` | **done** | 18 断言：密文不含明文、两次加密不同（随机 IV）、GCM 篡改必失败、密钥 0600 且不在 Web 根下 | 已进 CI |
 | R45 | 前端渲染层有真实 DOM 测试（PHP 测不到） | `.github/scripts/test-js-postmaster.mjs` + `js-harness/` | **done** | jsdom 28 断言：读回真实 DOM 文本；空 tbody 被删后能重建；Bootstrap 缺席时提示不崩 | 已进 CI（缺依赖时 exit 2，不静默通过） |
 | R46 | `catch (Exception)` 接不住 PHP 8 `Error` | `functions.resend_pool.inc.php` 4 处 | **done** | 全文已改为 `Throwable`；该文件自己的注释里就记着这个教训却仍有 4 处漏改 | — |
+| R47 | **生产 4 个 cron 从未执行**（"域名总览显示未知/未检测"的真因） | ofelia 容器 | **done** | **生产实测**：`docker logs <ofelia> \| grep <job>` 全空 → 4 个任务（healthcheck / pool_sync / postmaster_sync / retention）**从未注册**。根因：ofelia 只在**启动时**读标签，php-fpm 10-13 重建、ofelia 还是 10-09 启动的。`--force-recreate ofelia-mailcow` 后日志立即出现执行记录 | 教训：改 ofelia 标签 ⇒ **必须重建 ofelia**，`restart` 无效 |
+| R48 | 消除「域名总览」的空窗（不是去掉缓存） | `functions.overview.inc.php` + `crons/healthcheck.php` + `overview.js` | **done** | ① RDAP 三态（成功 24h / 404 1h / **失败 300s**），修掉"一次抖动固化 24 小时"；② 待体检队列（首屏只做 redis，零网络）；③ cron 改队列驱动，**队列空即退出**；④ `checked` 三态 ready/pending/none，前端显示「检测中…」并**轮询上限 60 秒** | 实测生产 16 域全量体检 **3.04 秒**（本地容器 40 秒），仍不进首屏 |
+| R49 | 排队轮询**必须有硬上限** | `overview.js` | **done** | 前 20 天第一次实现有 bug：`apply()` 每轮都调 `startPoll()`，而它重置预算 → **无限轮询**（测试抓到 31 次请求）。改为幂等（`pollActive` 守卫）。jsdom 断言「次数必须 ≤7」 | — |
+| R50 | 时刻必须标注**服务器时区** | `functions.overview.inc.php` + `overview.js` | **done** | 生产 `TZ=America/New_York`，操作者在北京。界面显示「09:07 待发送」会被读成北京时间 → "到点了为什么没发"。现在响应带 `server_tz`，界面标「服务器时区 EDT」 | 养号**没有坏**：窗口 08:00–20:00 EDT = 北京 20:00–次日 08:00 |
+| R51 | README 去掉上游推广、改为本项目定位 | `README.md` | **done** | 删除 Servercow 支持合同 / SAL / GitHub 赞助者名单 / Cowmunity+Telegram+𝕏+Mastodon 社群 / "由 GmbH 管理和维护"；**保留** GPLv3 与上游归属（许可证义务） | — |
+| R52 | 面向外行的《投递与风控白皮书》 | `docs/01-投递与信誉/投递与风控白皮书.md` + UI 弹窗 | **done** | 593 行；含原理类比、四层判定、实测证据（Gmail 认证头原文 + Port25 复核）、出站/入站排查手册、养号何时停、加号加 Key、怎么找 AI 帮忙（含安全红线）、24 项术语表。**后台 Postmaster 页签内置弹窗版**（markdown-it 渲染，三层降级） | 渲染契约测试 20 条新断言守住 |
 
 ---
 
@@ -98,7 +104,10 @@
 
 | 验证项 | 最后执行 | 结论 | 何时需要重跑 |
 |---|---|---|---|
-| **Postmaster 纯逻辑** | 2026-07b-cn.15 | **106/106**（`php .github/scripts/test-postmaster.php`） | 改 `postmaster_lib.inc.php` 后 |
+| **Postmaster 纯逻辑** | 2026-07b-cn.16 | **106/106**（`php .github/scripts/test-postmaster.php`） | 改 `postmaster_lib.inc.php` 后 |
+| **总览队列与 RDAP 三态** | 2026-07b-cn.16 | **58/58**（`php .github/scripts/test-overview-pending.php`，离线假 redis 桩）。含**源码级守卫**：队列函数体内不得出现 `curl_`/`dns_get_record` | 改 `functions.overview.inc.php` 的队列/RDAP 后 |
+| **总览 DOM 行为（jsdom）** | 2026-07b-cn.16 | **35/35**（`node .github/scripts/test-js-overview.mjs`）。含 `checked` 三态渲染、**轮询上限恰为 6 次**、时区标注 | 改 `overview.js` 后 |
+| **Postmaster 渲染契约** | 2026-07b-cn.16 | **51/51**（含 20 条白皮书断言：章节齐全、引用 Gmail 认证头与 Port25、无密钥形态、无 Twig 定界符） | 改 `tab-config-postmaster.twig` 后 |
 | **Postmaster 渲染/契约** | 2026-07b-cn.15 | **31/31**（`php .github/scripts/test-render-postmaster.php`） | 改 `tab-config-postmaster.twig` 或 `postmaster.js` 后 |
 | **Postmaster 真实 DOM（jsdom）** | 2026-07b-cn.15 | **28/28**（`node .github/scripts/test-js-postmaster.mjs`；先 `npm ci --prefix .github/scripts/js-harness`） | 改 `postmaster.js` 后 |
 | **凭据保管箱（离线）** | 2026-07b-cn.15 | **18/18**（`php .github/scripts/test-secretbox.php`） | 改 `functions.secretbox.inc.php` 后 |

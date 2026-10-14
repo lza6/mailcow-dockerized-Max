@@ -1,71 +1,170 @@
-# mailcow-dockerized-Max - 🐮 + 🐋 = 💕
+# mailcow-dockerized-Max
 
-[![翻译状态](https://translate.mailcow.email/widgets/mailcow-dockerized/-/translation/svg-badge.svg)](https://translate.mailcow.email/engage/mailcow-dockerized/)
-[![Twitter URL](https://img.shields.io/twitter/url/https/twitter.com/mailcow_email.svg?style=social&label=Follow%20%40mailcow_email)](https://twitter.com/mailcow_email)
-![Mastodon Follow](https://img.shields.io/mastodon/follow/109388212176073348?domain=https%3A%2F%2Fmailcow.social&label=Follow%20%40doncow%40mailcow.social&link=https%3A%2F%2Fmailcow.social%2F%40doncow)
+> mailcow: dockerized 的**中文魔改版**：在其完整邮件栈之上，改造成一台**多域名发信中继器 + 多域风控养号平台**，并配了一整套中文后台。
 
-## 关于本项目
+---
 
-本仓库是 [mailcow: dockerized](https://github.com/mailcow/mailcow-dockerized) 的**中文汉化魔改版**（Max 版），在保留上游全部功能的基础上，对 Web 管理界面与仓库文档做了完整中文本地化，适合作为邮件转发中继器使用。
+## 这是什么
 
-> 上游项目版权归 The Infrastructure Company GmbH 所有，本项目遵循上游的 **GNU 通用公共许可证第 3 版**（GPLv3）发布。
+本仓库基于上游 [mailcow: dockerized](https://github.com/mailcow/mailcow-dockerized)（一套基于 Docker 的完整邮件服务器栈：SMTP/IMAP/POP3/群件/反垃圾/杀毒/ACME）。
 
-## 想支持 mailcow？
+在**保留上游全部功能**的前提下，本项目做了三件事：
 
-请考虑 [与 Servercow 签订支持合同](https://www.servercow.de/mailcow?lang=en#support) 以支持项目的持续开发。_我们_支持_你_，同时_你_也在支持_我们_。:)
+1. **完整中文本地化** —— Web 管理界面与仓库文档全面汉化（`zh-cn` / `zh-tw` 语言包，缺失 key 自动回退英文，不会崩界面）。
+2. **加了一层"发信信誉"控制面** —— 因为实测发现：**认证 100% 通过，邮件照样进垃圾箱**（见下节）。于是本项目把出站改造成多中继（直发 / Cloudflare 桥 / Resend 号池），并把"域名信誉"做成可观测、可运营的东西。
+3. **加了一套运营后台** —— 域名总览与实时体检、Resend 号池（多账号负载均衡）、养号（Warmup）、Google Postmaster Tools 对接、投递链路追踪、审计日志、凭据保管箱。
 
-你也可以 [获取 SAL](https://www.servercow.de/mailcow?lang=en#sal)，这是一次性付款，无需承担责任，也不会产生退费。
+**给谁用**：需要在自有域名上做**事务性/通知类发信**、并因域名较新而持续被 Gmail 判垃圾箱的运维者。定位是**转发中继器**——入站按 MX 正常收信，出站走受控中继并按域养号。
 
-或者，只需帮忙传播一下：moo。
+---
 
-## 衷心感谢我们的 GitHub 赞助者 ❤️
-非常感谢每一位在 GitHub Sponsors 上支持我们的人——你们的贡献对我们意义非凡！特别感谢以下优秀的支持者：
+## 核心能力
 
-### 每月 100 美元赞助者
-  <a href="https://www.colba.net/" target=_blank><img
-    src="https://avatars.githubusercontent.com/u/204464723" height="58"
-  /></a>
-  <a href="https://www.maehdros.com/" target=_blank><img
-    src="https://avatars.githubusercontent.com/u/173894712" height="58"
-  /></a>
-  <a href="https://garske-systems.de/" target=_blank><img
-    src="https://garske-systems.de/img/logo_min.png" height="58"
-  /></a>
+| 能力 | 说明 | 主要入口 |
+|------|------|----------|
+| **域名实时体检** | 对每个发件域一键检查 MX / SPF / DKIM / DMARC（含 RDAP 域龄），并发 DNS 查询、结果缓存 | 后台 → 域名总览 → 体检弹窗 |
+| **域名总览后台** | 一屏看清 域 / 邮箱 / 号池 / 养号 四块状态，首屏零外部网络 I/O | `/admin/overview` |
+| **Resend 号池** | 多账号组池、域名自动分配、容量与日额度可见，绑定域名时可选自动写入 Cloudflare DNS | 后台 → Resend 号池 |
+| **养号 Warmup** | 按计划低速、分散地向真实收件人发信，并按 Message-ID **去收件箱/垃圾箱反查真实落点**，支持自动回复与垃圾箱救援 | 后台 → 养号 |
+| **Google Postmaster Tools** | 展示 Google **官方**域名信誉、用户投诉率、SPF/DKIM/DMARC 通过率、投递错误 | 后台 → 系统 → Postmaster Tools |
+| **中继链路** | 出站三通道可选：直发 / `cf-bridge`（Cloudflare Email Sending）/ Resend；用 SQL 映射驱动 postfix，零侵入原生配置 | `data/conf/postfix/`、`helper-scripts/cf-email-bridge/` |
+| **DKIM** | 密钥由 mailcow 生成与管理；绑定 Resend 域名时可自动把其要求的 DNS 记录写入 Cloudflare | — |
+| **投递追踪** | 按 Message-ID 串起 postfix → 中继 → 落点结果，可定位单封信卡在哪一段 | 后台 → 投递追踪 |
+| **审计日志** | 每个管理写动作留痕（含"披露密钥"单独记 `secret.reveal`，明细不含密钥），保留期 180 天 | 后台 → 审计 |
+| **凭据保管箱** | 见下方"两类凭据的区别" | — |
 
-### 每月 50 美元赞助者
-  <a href="https://github.com/vnukhr" target=_blank><img
-    src="https://avatars.githubusercontent.com/u/7805987?s=52&v=4" height="58"
-  /></a><a href="https://github.com/humiico" target=_blank><img
-    src="https://avatars.githubusercontent.com/u/110134705?s=52&v=4" height="58"
-  /></a>
+### 两类凭据的区别（重要）
 
-## 信息、文档与支持
+本项目对"凭据"分两种，**不能一刀切**：
 
-安装与支持说明请参阅 [官方文档](https://docs.mailcow.email/)。🐄
+| 类型 | 例子 | 存储方式 | 能否显示明文 |
+|------|------|----------|--------------|
+| **登录密码** | 邮箱账号登录密码 | mailcow 原生 **bcrypt 单向哈希** | **否 —— 不能**。数学上不可逆，任何系统都做不到。只能"重置后显示一次" |
+| **机器凭据** | 养号收件人的 IMAP/SMTP 应用专用密码 | 独立**凭据保管箱**：AES-256-GCM **可逆**加密，密钥 `data/conf/warmup/secret.key`（0600、不在 Web 根目录、已 gitignore） | **是 —— 可逆**。程序内部可解密使用；**界面只显示"是否已配置"** |
 
-🐛 **如果你发现了严重的安全问题，请发送邮件至 [info at servercow.de](mailto:info@servercow.de)。**
+> 这是刻意设计（见 ADR-004）：IMAP/SMTP 必须拿到明文密码才能工作，所以这类凭据需要可逆存储；而登录密码没有这个需求，保持单向哈希更安全。
 
-## Cowmunity 社区
+### 成熟度与已知边界（如实标注）
 
-[mailcow 社区](https://community.mailcow.email)
+> 本表的依据是 [`workflow_status.md`](workflow_status.md) 的需求追踪矩阵与验证台账。
 
-[Telegram mailcow 频道](https://telegram.me/mailcow)
+| 项 | 状态 |
+|----|------|
+| 域名总览、体检、审计、号池主流程、按钮逻辑 | **是 —— 已完成**，生产/本地实测有证据 |
+| Resend 号池扩容（生产 5 账号 / 13 域，2026-10-12） | **是 —— 已完成**；**2 个域受 Resend 免费套餐上限未绑定**（属套餐配额，非代码缺陷） |
+| 养号发送/判定/互动/救援链路 | **是（待数据）**—— 代码与调度已就位并有本地 E2E；**真实进箱数据"待数据"**，需用户为收件人账号填入 Google 应用专用密码后才会产生 |
+| Google Postmaster Tools | **部分 —— 本地已完成，线上未部署**（需 SSH 凭据）；另需用户本人启用 2 个 Google API 并配置 OAuth |
+| 域名体检耗时 | **部分 —— 优化中**：冷路径 33.8s → **8.6s**，缓存命中 **0.6–0.9s**（缓存失效时退回 8s 量级） |
+| 高并发压测 | **部分 —— 覆盖有限**：只读 1950 请求 0 失败、并发写 600 次 0 死锁；更高并发受 `pm.max_children=50` 限制 |
+| 显示邮箱**登录密码**明文 | **否 —— 做不到**（bcrypt 单向哈希）。这是硬边界，不是"没做" |
+| 知道邮件进了 Gmail 的哪个文件夹 | **否 —— 需收件人凭据**：要登录**收件人**账号（应用专用密码）才能反查 |
 
-[Telegram mailcow 非正式频道](https://t.me/mailcowOfftopic)
+---
 
-[官方 𝕏（Twitter）账号](https://twitter.com/mailcow_email)
+## 为什么邮件会进垃圾箱
 
-[官方 Mastodon 账号](https://mailcow.social/@doncow)
+**一句话结论：认证不是决定因素，域名自身的历史信誉才是。**
 
-Telegram 桌面客户端可在[多个平台](https://desktop.telegram.org)使用。你可以在群组历史记录中搜索关键词。
+实测证据（细节见 [`docs/01-投递与信誉/`](docs/01-投递与信誉/)）：
 
-## 其他说明
+- **15 个根域逐域实测，30 封全部进垃圾箱（进箱 0/30）**，其中 **14/15 的 DKIM/SPF/DMARC 全部 `pass`** —— 认证通过 ≠ 进箱。
+  （来源：[15个根域逐域验证报告](docs/01-投递与信誉/15个根域逐域验证报告.md)）
+- **同配置、同中继、认证全 pass，两个域连续 3 轮 100% 稳定分化**：`indigobasketglobal.com` 进箱率 **100%**，`urbansproutglobal.com` 进箱率 **0%**。**唯一变量是域名。**
+  （来源：[邮件投递通道对比报告](docs/01-投递与信誉/邮件投递通道对比报告.md)）
+- 直发通道 **0/31 = 0%**；同一批新域**单独发 1 封能进箱、混在批量里就进垃圾箱** → 指向"**短时间批量突发**"是关键触发因素。
 
-**重要**：mailcow 使用了多种开源软件。请确保你在使用 mailcow 之前同意它们的许可证条款。
-mailcow 本身的任何部分均以 **GNU 通用公共许可证第 3 版**发布。
+由此得出的运营原则（本项目正是围绕它建的）：
 
-mailcow 是 The Infrastructure Company GmbH（地址：Parkstr. 42, 47877 Willich, Germany）的注册商标。
+1. **不要让新域短时间批量连发** —— 改为按计划、低速、分散发送，即"养号"。
+2. **集中养 1~3 个域**，不要同时养 15 个同期同源的新域（在 Gmail 眼里它们是一个集群）。
+3. **用官方数据替代猜测** —— 接入 Google Postmaster Tools 拿域/信誉/投诉率。
 
-本项目由 The Infrastructure Company GmbH 管理和维护。
+> 想通读完整原理、排查方法与全部实测数据，见 **[《投递与风控白皮书》](docs/01-投递与信誉/投递与风控白皮书.md)**
+> —— 写给**不需要懂技术**的人：为什么进垃圾箱、我们做了什么、实测证据、怎么一步步排查、日常怎么维护。
+> 后台「Google Postmaster」页签内也内置了同一份内容的弹窗版（点「打开白皮书」即可）。
 
-起源于 @andryyy（André）
+---
+
+## 快速开始
+
+**前置**：一台能运行 Docker 的 Linux 服务器（本仓库在 Windows 上开发，实际部署走 Linux；如需在 Windows 侧联调，请走 WSL）。
+
+```bash
+git clone <本仓库地址>
+cd mailcow-dockerized
+
+# 1) 交互式生成配置（会写 mailcow.conf 并生成 .env 符号链接）
+#    首次生成的 DBROOT / REDISPASS 是随机密码 —— 不要提交！
+./generate_config.sh --dev        # --dev 表示不切换上游分支
+
+# 2) 启动
+docker compose pull
+docker compose up -d
+docker compose ps                 # 确认各容器健康
+```
+
+启动后访问 Web 后台。**本项目的主要运营页面**：
+
+- `/admin/overview` —— 域名总览（域 / 邮箱 / 号池 / 养号一屏）
+- 后台 → `配置` → `Resend 号池`
+- 后台 → `系统` → `Postmaster Tools`
+
+后续更新用 `./update.sh`。
+
+### 部署要点（本项目特有）
+
+- **本仓库不使用 `.sh` hook**；Windows 侧命令串联用 `; if($?) { }`，查找可执行文件用 `where.exe`。
+- **热更新规则**（改动后必须做的事，否则"改了不生效"）：
+  - 改 `data/web/**/*.php` 或模板 → `docker restart php-fpm-mailcow`
+  - 改 `data/web/js/site/*.js` → 同上，并 `rm -f data/web/cache/*.js`
+  - 改 `data/Dockerfiles/**` → **默认根本不生效**（compose 用的是 registry 预构建镜像，无 `build:` 段）。需给对应服务加 `build:` 后重建镜像。
+- 部署前**不要** `git add -A`：根目录可能混入本地工具目录（`.claude/`、`.codegraph/` 等）；`mailcow.conf`、`.env`、`data/dkim/`、`data/conf/mysql/` 等含密钥或私钥，**严禁提交**。
+- **不要**修改 `LICENSE`，也**不要**用 `git add .` 直接推上游镜像仓库。
+
+---
+
+## 日常运维
+
+| 看什么 | 去哪 |
+|--------|------|
+| 全局态势（域/邮箱/号池/养号） | `/admin/overview` |
+| 某域 DNS 是否齐全 | 域名总览 → 该域「体检」弹窗 |
+| 号池容量是否满、域名绑定在了哪个账号 | 后台 → Resend 号池 |
+| 养号进度、今日配额、逐封落点（进箱/垃圾箱） | 后台 → 养号 |
+| Google 官方域信誉 / 投诉率 / 投递错误 | 后台 → 系统 → Postmaster Tools |
+| 单封信卡在哪一段 | 后台 → 投递追踪 |
+| 谁改了什么 | 后台 → 审计 |
+
+### 常见故障去哪查
+
+| 症状 | 大概率方向 | 文档 |
+|------|------------|------|
+| **收不到信（入站）** | 先查 MX 是否指错 | [故障处理-breezeshelf](docs/01-投递与信誉/故障处理-breezeshelf收不到邮件.md) |
+| **发信进垃圾箱（出站）** | 先看接收方 `Authentication-Results` 头，再谈信誉 | [邮件投递诊断报告](docs/01-投递与信誉/邮件投递诊断报告.md) |
+| 换中继后 SPF 反而 fail | 中继商 IP 未进发件域 SPF | [中继方案实施指南](docs/01-投递与信誉/中继方案实施指南.md) |
+| Postmaster 一直"暂无数据" | 发送量不足（常见，非故障）或授权账号不一致 | [PostmasterTools接入指南](docs/02-接入指南/PostmasterTools接入指南.md) |
+| 页面表格整表空白且无报错 | 上游 `footer.js` 会删掉空 `tbody` | [SOP-新增功能与API](docs/04-运维与工程/SOP-新增功能与API.md) |
+
+> 改代码前建议先读 [`workflow_status.md`](workflow_status.md) 的**验证台账**——哪些验证做过、有效期、改什么才需要重跑，都有记录，能避免重复劳动。
+
+---
+
+## 文档索引
+
+项目文档总目录：[`docs/README.md`](docs/README.md)。几个关键入口：
+
+- **投递与信誉（本项目最核心的问题域）**：[`docs/01-投递与信誉/`](docs/01-投递与信誉/) —— 含 15 域逐域验证、三通道对比、Mailtrap 实测、入站故障处理
+- **接入指南**：[`docs/02-接入指南/`](docs/02-接入指南/) —— Postmaster Tools、Resend 材料清单
+- **功能设计**：[`docs/03-功能设计/`](docs/03-功能设计/) —— Resend 号池 PRD/技术设计、养号任务台账
+- **运维与工程**：[`docs/04-运维与工程/`](docs/04-运维与工程/) —— 架构与 ADR、SOP、CI/CD、并发评估、变更报告
+- **需求追踪矩阵（权威）**：[`workflow_status.md`](workflow_status.md) —— 需求→实现→证据、验证台账、部署清单
+- **开发指南**：[`CLAUDE.md`](CLAUDE.md) —— 架构、汉化工作流、环境约束
+
+---
+
+## 许可与上游归属
+
+- 本仓库基于 **[mailcow: dockerized](https://github.com/mailcow/mailcow-dockerized)** 开发。上游项目的版权归 **The Infrastructure Company GmbH**（Parkstr. 42, 47877 Willich, Germany）所有；`mailcow` 是该公司注册商标。
+- 本仓库及上游均以 **GNU 通用公共许可证第 3 版（GPLv3）** 发布，详见 [`LICENSE`](LICENSE)。**本仓库的汉化与魔改同样受 GPLv3 约束，许可证声明与上游归属不得删除。**
+- mailcow 使用了多种开源软件，使用前请确认你同意它们的许可证条款。
+- 上游项目起源于 @andryyy（André）。

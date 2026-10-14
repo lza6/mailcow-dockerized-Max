@@ -1,25 +1,36 @@
 <?php
 /**
- * mailcow-dockerized-Max — 域名体检（由 ofelia 每 30 分钟调用一次）
+ * mailcow-dockerized-Max — 域名体检（由 ofelia 调用，标签见 docker-compose.yml）
  *
  * 为什么需要它：
  *   「域名总览」页上的「收信 MX / 认证」两列读的是 redis 里的 `OV_CHECK/<域>`，
  *   而那个缓存**只有 1 小时 TTL**。没有定时任务时，管理员每次打开页面看到的
  *   大概率都是「未检测」—— 除非他恰好在一小时前手动点过「体检」。
- *   实测就是这个现象：缓存一过期，整列全部退回「未检测」。
  *
- * 本任务把体检做成**周期性**的，让页面始终有数据。
- * 同时刷新域名年龄（`OV_RDAP/<域>`，24 小时 TTL）。
+ * 本任务的运行策略（**队列驱动 + 定期全量兜底**）：
+ *   1) 若 `OV_CHECK_PENDING` 队列非空（页面发现空缓存时会入队）→ 只查队列里的域；
+ *   2) 否则若距上次全量 ≥25 分钟 → 全量刷一遍；
+ *   3) 两者都不满足 → **立即退出，不发任何 DNS/RDAP 请求**（稳态成本≈0）。
  *
- * ⚠️ 这里**有意复制**了 `inc/ajax/overview.php` 里 `ov_run_check()` 的判定逻辑，
+ *   (1) 解决"新域/缓存被清后要干等 30 分钟"，
+ *   (2) 解决"缓存存在但 TTL 已过期、或 DNS 值已变" —— 这两类队列发现不了。
+ *   25 < 30，保证在 OV_CHECK 的 1 小时 TTL 到期前至少刷到一次。
+ *
+ * ⚠️ 这里**有意复制**了 `inc/ajax/overview.php` 里 `ov_run_check()` 的 DNS 判定逻辑，
  *    而不是 require 那个文件：那个函数定义在**端点文件内部**，端点 require 即执行，
  *    在 CLI 下会被它的主流程与 CSRF 网关拦住。要复用就必须先把函数抽到
  *    inc/ 里 —— 那是独立的重构，不在本次范围内。
  *    两处逻辑若有一处改动，**必须同时改另一处**。
  *
+ * ✅ 例外：**RDAP / 域名年龄**已不再重复实现 —— 本文件直接调用
+ *    `inc/functions.overview.inc.php` 的 `ov_domain_age_days($redis, $domain, false)`，
+ *    与页面侧共用同一份缓存语义（成功 24h / 未注册 1h / 失败 300s）。
+ *    历史教训：这里曾有一份独立 curl，失败时写 `registered=false` 且 24h TTL，
+ *    与页面侧写入互相污染，导致「未知」被固化一整天。
+ *
  * 安全/资源约束：
- *   - 只做只读 DNS 查询 + 写 redis，**不碰数据库、不改任何配置**
- *   - 每域 4 次查询，16 个域约 2~3 秒；间隔 30 分钟，可忽略
+ *   - 只做只读 DNS 查询 + 写 redis，**不碰数据库配置、不改任何配置**
+ *   - 队列空时零网络请求；全量轮每域 3~4 次查询，实测 16 域约 3 秒
  *   - 异常只写 STDERR，不影响其它 cron
  */
 
@@ -27,6 +38,8 @@ require_once(__DIR__ . '/../web/inc/vars.inc.php');
 if (file_exists(__DIR__ . '/../web/inc/vars.local.inc.php')) {
   include_once(__DIR__ . '/../web/inc/vars.local.inc.php');
 }
+// ov_domain_age_days / ov_mark_pending / ov_take_pending 等（纯函数，无副作用）
+require_once(__DIR__ . '/../web/inc/functions.overview.inc.php');
 
 $dsn = $database_type . ":unix_socket=" . $database_sock . ";dbname=" . $database_name;
 $opt = [
@@ -60,10 +73,47 @@ try {
 $host = strtolower((string)getenv('MAILCOW_HOSTNAME'));
 $checked = 0; $abnormal = 0;
 
+// ---- 决定本轮处理哪些域（队列驱动 + 定期全量兜底）----
+$lastFullKey = 'OV_CHECK_LAST_FULL';
+$wantAll = true;
+if ($redis) {
+  try {
+    $last = (int)$redis->get($lastFullKey);
+    if ($last > 0 && (time() - $last) < 25 * 60) { $wantAll = false; }
+  } catch (Throwable $e) {}
+}
+
+if ($wantAll) {
+  $targets = array();
+  foreach ($pdo->query("SELECT `domain` FROM `domain` WHERE `active`='1' ORDER BY `domain` ASC")->fetchAll() as $x) {
+    $targets[] = $x['domain'];
+  }
+  $mode = 'full';
+} else {
+  // 队列为空 → 不发任何 DNS/RDAP 请求，直接退出。
+  // 这是本策略最重要的一条：稳态下 cron 成本 ≈ 0，
+  // 从而可以放心把间隔保持在 30 分钟而不与别的 cron 抢 CPU。
+  $targets = ov_take_pending($redis, 50);
+  $mode = 'queue';
+  if (!$targets) {
+    echo '[healthcheck] queue empty, skip' . PHP_EOL;
+    exit(0);
+  }
+}
+
+// 活跃域集合：队列里的域可能已停用/已删除（入队后管理员改了状态），
+// 必须复核，否则会对不该管的域作 DNS 查询，还会把 OV_CHECK 写回去，
+// 让总览页显示一个"已停用但健康"的假象。
+$activeSet = array();
 try {
-  $rows = $pdo->query("SELECT `domain` FROM `domain` WHERE `active`='1' ORDER BY `domain` ASC")->fetchAll();
-  foreach ($rows as $x) {
-    $domain = $x['domain'];
+  foreach ($pdo->query("SELECT `domain` FROM `domain` WHERE `active`='1'")->fetchAll() as $x) {
+    $activeSet[$x['domain']] = true;
+  }
+} catch (Throwable $e) {}
+
+try {
+  foreach ($targets as $domain) {
+    if (!isset($activeSet[$domain])) { continue; }
     $r = array('domain' => $domain, 'checked_at' => date('Y-m-d H:i:s'));
 
     // ---- MX ----
@@ -119,59 +169,32 @@ try {
     $r['dmarc'] = $dmarc;
     $r['dmarc_ok'] = $dmarc !== null;
 
+    $wrote = false;
     if ($redis) {
-      try { $redis->setex('OV_CHECK/' . $domain, 3600, json_encode($r)); } catch (Throwable $e) {}
+      try { $wrote = (bool)$redis->setex('OV_CHECK/' . $domain, 3600, json_encode($r)); }
+      catch (Throwable $e) { $wrote = false; }
+    }
+    // 本轮没写成缓存（redis 写失败）→ 重新排队，而不是干等下一个 25 分钟的全量。
+    // 这是自愈不是重试风暴：每轮最多取 50 个，且要等到下一个 tick 才会再取。
+    if ($redis && !$wrote) {
+      try { $redis->zAdd(OV_PENDING_KEY, time(), $domain); } catch (Throwable $e) {}
     }
 
-    // ---- 域名年龄（OV_RDAP，24h）----
-    try {
-      if ($redis) {
-        $rk = 'OV_RDAP/' . $domain;
-        $cached = $redis->get($rk);
-        $need = true;
-        if ($cached !== false && $cached !== null) {
-          $d = json_decode($cached, true);
-          if (is_array($d) && isset($d['registered'])) { $need = false; }
-        }
-        if ($need) {
-          $tld = strtolower(substr(strrchr($domain, '.'), 1));
-          $bases = array(
-            'com' => 'https://rdap.verisign.com/com/v1/domain/',
-            'net' => 'https://rdap.verisign.com/net/v1/domain/',
-          );
-          $url = (isset($bases[$tld]) ? $bases[$tld] : 'https://rdap.org/domain/') . rawurlencode($domain);
-          $ch = curl_init($url);
-          curl_setopt_array($ch, array(
-            CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 4,
-            CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => 12,
-            CURLOPT_USERAGENT => 'mailcow-domain-health',
-            CURLOPT_HTTPHEADER => array('Accept: application/rdap+json'),
-          ));
-          $body = curl_exec($ch);
-          $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-          curl_close($ch);
-          $registered = null;
-          if ($body !== false && $code === 200) {
-            $j = json_decode($body, true);
-            foreach ((array)($j['events'] ?? array()) as $ev) {
-              if (($ev['eventAction'] ?? '') === 'registration' && !empty($ev['eventDate'])) {
-                $registered = strtotime($ev['eventDate']);
-              }
-            }
-          }
-          if ($registered) {
-            $redis->setex($rk, 86400, json_encode(array('registered' => $registered)));
-          }
-        }
-      }
-    } catch (Throwable $e) {
-      fwrite(STDERR, '[healthcheck] RDAP ' . $domain . ' 失败: ' . $e->getMessage() . PHP_EOL);
-    }
+    // ---- 域名年龄 ----
+    // 共用 inc/functions.overview.inc.php 的实现（成功 24h / 未注册 1h / 失败 300s）。
+    // 此前这里有一份独立的 curl 副本，失败时写 registered=false + 86400 TTL，
+    // 与页面侧写入互相污染 —— 删掉副本就消除了这个结构性根因。
+    ov_domain_age_days($redis, $domain, false);
 
     $checked++;
     if (!$r['mx_ok'] || !$r['spf_ok'] || !$r['dkim_ok'] || !$r['dmarc_ok']) { $abnormal++; }
   }
-  echo '[healthcheck] checked=' . $checked . ' abnormal=' . $abnormal . PHP_EOL;
+
+  // 记下这次全量时间，供下一轮判断是否需要全量
+  if ($mode === 'full' && $redis) {
+    try { $redis->setex($lastFullKey, 3600, (string)time()); } catch (Throwable $e) {}
+  }
+  echo '[healthcheck] mode=' . $mode . ' checked=' . $checked . ' abnormal=' . $abnormal . PHP_EOL;
 } catch (Throwable $e) {
   fwrite(STDERR, '[healthcheck] failed: ' . $e->getMessage() . PHP_EOL);
   exit(1);

@@ -42,6 +42,7 @@
 | 改**已有表**的列/索引 | `init_db` **不会** ALTER，必须自己写迁移 SQL 并在部署脚本里执行 |
 | 改 `docker-compose.yml`（ofelia 标签 / 新挂载） | `docker compose up -d --force-recreate --no-deps <容器>`，**随后必须重启 nginx**（它缓存上游 IP） |
 | 新增定时任务 | 标签挂在**承载它的容器**上（php-fpm 或 dovecot），不是 ofelia 容器上 |
+| 改了 ofelia 标签后 | **必须 `--force-recreate ofelia-mailcow`**，`restart` 无效 —— ofelia **只在启动时**读容器标签注册任务，不热重载。生产实测踩过：php-fpm 在 10-13 重建、ofelia 还是 10-09 启动的，于是新增的 4 个任务（healthcheck / pool_sync / postmaster_sync / retention）**从未执行过**，日志里一条记录都没有，而页面表现为「未检测 / 未知」——看起来像功能坏了。**判定方法**：`docker logs <ofelia> \| grep <job名>` 无输出即为未注册；对照 `docker inspect <php-fpm>` 的标签与两者的 StartedAt |
 | 新写操作端点 | 必须做 CSRF 判定（见 §2.2）；无参动作尤其危险 |
 | 需要访问邮件存储 | **不要**把 vmail 卷挂进 php-fpm；让 dovecot 侧采集后写聚合表（见 §2.4） |
 
@@ -98,6 +99,12 @@ $('tbody').filter(function(){ return $(this).children().length < 1; }).remove();
 | Cloudflare 写验证类 CNAME 不给 `proxied` | 记录建得出来、面板看着正常，第三方却永远验不过（橙云把目标藏了） | 验证/签发类记录（TXT/CNAME/MX）一律**显式 `proxied: false`** |
 | PHP 8 里只 `catch (Exception)` | `null->method()` / 未定义变量抛的是 **`Error`**，接不住 → 一路逃成 HTTP 500 | 新代码统一 `catch (Throwable)`；`functions.resend_pool.inc.php` 曾因此整个绑定流程崩在中间、留下脏状态 |
 | 本地容器（`~/mailcow-e2e`）落后于仓库 | 测试报"文件不存在"，看着像部署缺口，其实是快照旧 | 跑测试前先 `docker compose cp` 同步改动过的文件；别把容器状态当成代码事实 |
+| **Twig 会解析 HTML 注释里的定界符** | 模板直接抛 `SyntaxError: Unexpected token "end of print statement"` | 大括号成对的打印/语句定界符**在任何位置都不能出现**（含 `<!-- -->` 注释、`<script>` 正文）。写"提醒别人别写定界符"的注释时自己踩过 |
+| jsdom 里提前劫持 `window.setTimeout` | ready 回调永不执行 → 事件处理器没绑上 → 点按钮毫无反应、界面全空（**看起来像被测脚本坏了**） | jQuery 的 `.ready()` 内部就用 `window.setTimeout` 兜底。**先让 ready 跑完再劫持**（见 `test-js-overview.mjs` 的 `hijackTimers()`） |
+| jsdom 里 jQuery deferred 是异步的 | 触发 click 后立刻断言 → 界面还是空的 | `$.getJSON().done()` 走微/宏任务；推进可控定时器时**每轮都要先 `await` 一个真实的 tick** |
+| RDAP 失败被当成"未注册" | 一次网络抖动把「未知」**固化 24 小时**；cron 侧读回后以为"已有值"不再重试 → 交叉污染永不恢复 | 缓存必须**三态**：成功 24h / 404 未注册 1h / **失败 300s + 带 error 原因**。「确定的结论」与「没查成」是两件事 |
+| 比例/速率类指标在页面与 cron 各写一份实现 | 两侧语义漂移、互相污染 | 抽到 `inc/` 共用（如 `ov_domain_age_days()`）；`healthcheck.php` 曾有一份独立 RDAP curl 副本，已删除 |
+| jsdom 里给 `$('#id').trigger('click')` 断言不到效果 | 以为处理器没绑 | 先确认该 id 在**真实模板**里存在（测试从 twig 抽 id，不手写 DOM），并确认按钮绑的是哪个函数 |
 
 ---
 
